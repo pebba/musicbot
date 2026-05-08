@@ -1,0 +1,6 @@
+[Unit]
+Description=Notify Discord on musicbot crash
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/serverboi/musicbot/scripts/notify-crash.sh

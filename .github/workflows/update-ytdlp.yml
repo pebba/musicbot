@@ -1,0 +1,28 @@
+name: Update yt-dlp
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"  # every Monday at 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: self-hosted
+    steps:
+      - name: Update yt-dlp
+        run: |
+          cd /home/serverboi/musicbot
+          source venv/bin/activate
+          old=$(pip show yt-dlp | grep Version)
+          pip install -U yt-dlp -q
+          new=$(pip show yt-dlp | grep Version)
+          if [ "$old" != "$new" ]; then
+            echo "Updated: $old -> $new"
+            sudo systemctl restart musicbot
+          else
+            echo "Already up to date: $old"
+          fi
+      - name: Health check
+        run: |
+          sleep 5
+          systemctl is-active --quiet musicbot || (journalctl -u musicbot -n 30 --no-pager && exit 1)
