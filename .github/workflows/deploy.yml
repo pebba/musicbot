@@ -1,0 +1,46 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /home/serverboi/musicbot
+    steps:
+      - name: Pull and install
+        run: |
+          git fetch origin main && git reset --hard origin/main
+          source venv/bin/activate
+          pip install -r requirements.txt -q
+
+      - name: Write .env
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+        run: |
+          {
+            echo "DISCORD_TOKEN=$DISCORD_TOKEN"
+            [ -n "$SPOTIFY_CLIENT_ID" ] && echo "SPOTIFY_CLIENT_ID=$SPOTIFY_CLIENT_ID"
+            [ -n "$SPOTIFY_CLIENT_SECRET" ] && echo "SPOTIFY_CLIENT_SECRET=$SPOTIFY_CLIENT_SECRET"
+          } > .env
+
+      - name: Write crash alert config
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_DM_USER_ID: ${{ secrets.DISCORD_DM_USER_ID }}
+        run: |
+          [ -n "$DISCORD_WEBHOOK_URL" ] && echo "$DISCORD_WEBHOOK_URL" > .discord-webhook
+          [ -n "$DISCORD_DM_USER_ID" ] && echo "$DISCORD_DM_USER_ID" > .discord-dm-user
+
+      - name: Restart
+        run: sudo systemctl restart musicbot
+
+      - name: Health check
+        run: |
+          sleep 5
+          systemctl is-active --quiet musicbot || (journalctl -u musicbot -n 30 --no-pager && exit 1)

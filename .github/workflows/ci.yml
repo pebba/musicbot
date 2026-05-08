@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check syntax
+        run: python -m py_compile bot.py cogs/constants.py cogs/utils.py cogs/models.py cogs/views.py cogs/music.py
+
+      - name: Validate radio_stations.json
+        run: python -c "import json; json.load(open('radio_stations.json'))"
