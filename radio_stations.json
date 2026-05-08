@@ -1,0 +1,20 @@
+{
+  "Ö3":                "http://orf-live.ors-shoutcast.at/oe3-q2a",
+  "Radio Wien":        "https://orf-live.ors-shoutcast.at/wie-q2a",
+  "Radio NÖ":          "https://orf-live.ors-shoutcast.at/noe-q2a",
+  "88.6":              "https://edge66.streamonkey.net/radio886-onair/stream/mp3",
+  "Kronehit":          "http://onair.krone.at/kronehit.mp3",
+  "Energy":            "http://stream1.energy.at:8000/vie",
+  "Rock Antenne":      "https://stream.rockantenne.de/rockantenne/stream/mp3",
+  "Arabella":          "https://edge05.streams.arabella.at/arabella-wien",
+  "FM4":               "https://orf-live.ors-shoutcast.at/fm4-q1a",
+  "Flamingo":          "https://live.radioflamingo.at/rf",
+  "Bollerwagen":       "http://stream.ffn.de/radiobollerwagen/mp3-192",
+  "Kiss FM":           "https://stream.kissfm.de/kissfm-deutschrap-hart/mp3-128/",
+  "Extra FM":          "https://relay2.social3.hr/radio/8190/radio.mp3",
+  "Радио Книга":       "http://bookradio.hostingradio.ru:8069/fm",
+  "RadiCro":           "https://radicrojapan.out.airtime.pro/radicrojapan_a",
+  "Union Radio":       "https://unionradio.radioca.st/;",
+  "Hiphop Africa":     "https://servidor37.brlogic.com:7024/live",
+  "South Wales Radio": "https://playerservices.streamtheworld.com/api/livestream-redirect/SWRFM.mp3"
+}
