@@ -30,13 +30,15 @@ else
   echo "Cleanup cron installed — runs Sundays at 04:00."
 fi
 
-# --- Crash alerting systemd setup ---
+# --- systemd units ---
 # The webhook URL / DM user ID are written by the deploy workflow on each push.
 sudo mkdir -p /etc/systemd/system/musicbot.service.d
+sudo cp "$MUSICBOT_DIR/scripts/musicbot.service" /etc/systemd/system/
 sudo cp "$MUSICBOT_DIR/scripts/crash-notify.conf" /etc/systemd/system/musicbot.service.d/
 sudo cp "$MUSICBOT_DIR/scripts/musicbot-notify@.service" /etc/systemd/system/
 sudo systemctl daemon-reload
-echo "Crash alerting systemd files installed."
+sudo systemctl enable musicbot
+echo "systemd units installed."
 
 echo ""
 echo "Done. Push to main to trigger a deploy — the webhook/DM config will be written automatically."

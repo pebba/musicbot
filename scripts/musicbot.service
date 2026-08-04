@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Music Bot
+After=network.target
+
+[Service]
+Type=simple
+User=serverboi
+WorkingDirectory=/home/serverboi/musicbot
+ExecStart=/home/serverboi/musicbot/venv/bin/python bot.py
+# crash-notify.conf overrides this to Restart=always, which is what makes
+# /restart work — the bot exits cleanly and systemd brings it back.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
