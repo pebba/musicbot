@@ -3,6 +3,11 @@ name: Deploy
 on:
   push:
     branches: [main]
+  # Auto-merged dependabot PRs are merged with GITHUB_TOKEN, and those pushes
+  # deliberately do not trigger workflows — so poll for anything we missed.
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -12,8 +17,15 @@ jobs:
         working-directory: /home/serverboi/musicbot
     steps:
       - name: Pull and install
+        id: pull
         run: |
+          before=$(git rev-parse HEAD)
           git fetch origin main && git reset --hard origin/main
+          if [ "$before" = "$(git rev-parse HEAD)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
           source venv/bin/activate
           pip install -r requirements.txt -q
 
@@ -37,7 +49,9 @@ jobs:
           [ -n "$DISCORD_WEBHOOK_URL" ] && echo "$DISCORD_WEBHOOK_URL" > .discord-webhook
           [ -n "$DISCORD_DM_USER_ID" ] && echo "$DISCORD_DM_USER_ID" > .discord-dm-user
 
+      # Skip on an hourly poll that found nothing — no point cutting playback.
       - name: Restart
+        if: steps.pull.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         run: sudo systemctl restart musicbot
 
       - name: Health check
