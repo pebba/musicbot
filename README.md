@@ -40,3 +40,4 @@ A self-hosted Discord music bot with YouTube Music, Spotify, live radio, autopla
 | `/join` / `/leave` | Join or leave a voice channel |
 | `/djrole <role>` | Restrict commands to a role (Manage Server required) |
 | `/ytmonly` | Toggle strict YouTube Music mode (Manage Server required) |
+| `/restart` | Restart the bot (bot owner only) |

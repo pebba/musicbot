@@ -16,6 +16,20 @@ else
   echo "Backup cron installed — runs daily at 02:00, keeps 30 days in $BACKUP_DIR"
 fi
 
+# --- Disk cleanup ---
+# The root LV is small; the runner and VS Code Remote server fill it and take
+# the bot down with them. Cap the journal and prune the rest weekly.
+sudo sed -i 's/^#\?SystemMaxUse=.*/SystemMaxUse=200M/' /etc/systemd/journald.conf
+sudo systemctl restart systemd-journald
+
+CLEAN_LINE="0 4 * * 0 find /home/serverboi/actions-runner/_diag -type f -mtime +7 -delete 2>/dev/null; find /home/serverboi/.vscode-server/cli/servers -maxdepth 1 -type d -atime +30 -exec rm -rf {} + 2>/dev/null; rm -rf /home/serverboi/.cache/yt-dlp"
+if crontab -l 2>/dev/null | grep -qF "actions-runner/_diag"; then
+  echo "Cleanup cron already installed."
+else
+  (crontab -l 2>/dev/null; echo "$CLEAN_LINE") | crontab -
+  echo "Cleanup cron installed — runs Sundays at 04:00."
+fi
+
 # --- Crash alerting systemd setup ---
 # The webhook URL / DM user ID are written by the deploy workflow on each push.
 sudo mkdir -p /etc/systemd/system/musicbot.service.d

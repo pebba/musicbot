@@ -1205,6 +1205,15 @@ class MusicCog(commands.Cog):
         else:
             await interaction.response.send_message("🎲 Autoplay **disabled**.")
 
+    @app_commands.command(name="restart", description="Restart the bot (owner only)")
+    async def restart(self, interaction: discord.Interaction):
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        await interaction.response.send_message("♻️ Restarting — back in a few seconds.")
+        # ponytail: exit and let systemd Restart=always bring it back — no sudo, no SSH.
+        await self.bot.close()
+
     @app_commands.command(name="help", description="Show all available bot commands")
     async def help_cmd(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -1252,7 +1261,8 @@ class MusicCog(commands.Cog):
         embed.add_field(name="🛡️ Admin", value=(
             "`/djrole <role>` — Restrict music commands to a specific role (omit to clear)\n"
             "`/ytmonly` — Toggle strict YouTube Music mode (no YouTube fallback; direct links still work)\n"
-            "Requires **Manage Server** permission."
+            "Requires **Manage Server** permission.\n"
+            "`/restart` — Restart the bot (bot owner only)"
         ), inline=False)
         embed.set_footer(text="Supports YouTube, Spotify tracks/albums/playlists, and direct stream URLs.")
         await interaction.response.send_message(embed=embed)
