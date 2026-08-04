@@ -14,5 +14,7 @@ PyNaCl==1.6.2
 python-dotenv==1.2.2
 typing_extensions==4.15.0
 yarl==1.24.2
-yt-dlp==2026.7.4
+# Deliberately unpinned: update-ytdlp.yml upgrades this weekly, and a pin here
+# would downgrade it again on the next deploy.
+yt-dlp
 spotipy==2.26.0
