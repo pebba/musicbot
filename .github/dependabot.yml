@@ -4,8 +4,15 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # One PR for everything instead of one per transitive pin.
+    groups:
+      python-deps:
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
