@@ -47,6 +47,8 @@ class MusicCog(commands.Cog):
         # Per searched artist: video ids autoplay fetched and found to be by
         # someone else (or live, too long...), so later picks skip them unfetched.
         self._ytm_rejects: dict[str, set[str]] = {}
+        # Per searched artist: video ids confirmed to be that artist's songs.
+        self._ytm_good: dict[str, set[str]] = {}
         os.makedirs(PLAYLISTS_DIR, exist_ok=True)
         self._idle_check.start()
         self._progress_update.start()
@@ -610,6 +612,7 @@ class MusicCog(commands.Cog):
         # for, the tail is deep cuts. Keep one entry per song, best-ranked first.
         current_key = song_key(track.title, track.artist)
         rejects = self._ytm_rejects.setdefault(artist.lower(), set())
+        good = self._ytm_good.setdefault(artist.lower(), set())
         seen: set[str] = set()
         ranked = []
         for e in entries:
@@ -671,7 +674,29 @@ class MusicCog(commands.Cog):
                     or (duration and not 60 <= duration <= 900)):
                 rejects.add(chosen["id"])
                 continue
+            good.add(chosen["id"])
             if song_key(info.get("title", ""), _extract_artist(info)) in avoid:
+                continue
+            state.queue.append(Track(info, "Autoplay 🎲"))
+            state.last_artist = artist
+            return True
+
+        # Every candidate left was another act: the artist has only a handful of
+        # songs among the results (seen with CRO and Wanda). Repeat the confirmed
+        # song heard longest ago rather than stopping.
+        last_played = {k: i for i, k in enumerate(recent)}
+        repeats: dict[str, dict] = {}
+        for e in entries:
+            key = song_key(e.get("title", ""), artist)
+            if e.get("id") in good and key != current_key:
+                repeats.setdefault(key, e)
+        for key in sorted(repeats, key=lambda k: last_played.get(k, -1))[:3]:
+            try:
+                info = await self._fetch_info(f"https://music.youtube.com/watch?v={repeats[key]['id']}")
+                if "entries" in info:
+                    info = info["entries"][0]
+            except Exception as e:
+                print(f"[musicbot] Autoplay fetch error: {e}")
                 continue
             state.queue.append(Track(info, "Autoplay 🎲"))
             state.last_artist = artist
@@ -699,6 +724,7 @@ class MusicCog(commands.Cog):
             return None
         entries = list(results.get("entries") or [])
         self._ytm_rejects.pop(key, None)  # fresh results, fresh verdicts
+        self._ytm_good.pop(key, None)
         self._ytm_cache.pop(key, None)
         self._ytm_cache[key] = (time.time(), entries)
         if len(self._ytm_cache) > 200:
