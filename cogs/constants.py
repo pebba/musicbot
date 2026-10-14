@@ -33,7 +33,7 @@ _AUTOPLAY_SKIP_RE = re.compile(
     r'|\b(?:guitar|piano|drums?)\s+cover\b'  # instrument cover
     r'|\binstrumental\b'                 # instrumental (no vocals) version
     r'|\bdemo\b'                         # demo recordings
-    r'|\ba\s*cappella\b'                 # a cappella version
+    r'|\ba\s*cap+el+a\b'                 # a cappella / acapella version
     r'|\bacoustic\b',                    # acoustic version/session
     re.IGNORECASE
 )
