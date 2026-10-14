@@ -23,6 +23,7 @@ except ImportError:
 
 from .constants import (
     AUTOPLAY_DEPTH,
+    BUSY_FILE,
     FFMPEG_RECONNECT,
     PLAYLISTS_DIR,
     RADIO_STATIONS,
@@ -56,6 +57,8 @@ class MusicCog(commands.Cog):
             saved = self.settings.get(str(guild_id), {})
             state.dj_role = saved.get("dj_role")
             state.ytm_only = saved.get("ytm_only", False)
+            state.volume = saved.get("volume", state.volume)
+            state.autoplay = saved.get("autoplay", False)
             self.states[guild_id] = state
         return self.states[guild_id]
 
@@ -130,26 +133,73 @@ class MusicCog(commands.Cog):
         except discord.HTTPException as e:
             print(f"[musicbot] Could not send to channel: {e}")
 
-    async def _retire_np(self, state: GuildState):
-        """Drop the buttons from the last now-playing message so only the
-        current one has live controls (and old views don't pile up in memory)."""
+    async def _retire_np(self, state: GuildState, delete: bool = False):
+        """Retire the last now-playing message: deleted when a new one replaces
+        it (keeps the channel from filling up), otherwise just stripped of its
+        buttons so it stays as a record of what played last."""
         view, msg = state.np_view, state.np_message
         state.np_view = None
         state.np_message = None
         if view:
             view.stop()
-            if msg:
-                try:
-                    await msg.edit(view=None)
-                except discord.HTTPException:
-                    pass
+        if not msg:
+            return
+        try:
+            if delete:
+                await msg.delete()
+            elif view:
+                await msg.edit(view=None)
+        except discord.HTTPException:
+            pass
 
     def _clear_playback(self, state: GuildState):
         self._cancel_prefetch(state)
+        if state._preload:
+            state._preload[1].cancel()
+            state._preload = None
         state.queue.clear()
         state.current = None
         state.radio_station = None
         state.skip_requested = False
+
+    def _end_radio(self, state: GuildState, vc: discord.VoiceClient | None):
+        """Hand the voice channel over from radio to the queue (/play while radio runs)."""
+        if state.radio_station:
+            state.radio_station = None
+            state.radio_failures = 0
+            if vc:
+                vc.stop()
+
+    async def _resolve(self, track: Track, ytm_only: bool) -> bool:
+        query = track.webpage_url or track.query
+        info = await self._fetch_track(query, ytm_only=ytm_only) if query else None
+        if info:
+            track.resolve(info)
+        return bool(info)
+
+    def _start_preload(self, state: GuildState):
+        """Resolve the next queued track in the background while this one plays.
+        Spotify, playlist and saved-playlist tracks are only search terms until
+        then, which otherwise leaves a few seconds of silence before each one."""
+        if not state.queue or state.radio_station:
+            return
+        nxt = state.queue[0]
+        if nxt.is_resolved and not nxt.is_expired():
+            return
+        if state._preload and state._preload[0] is nxt:
+            return  # one background attempt per track; the transition retries if needed
+        state._preload = (nxt, asyncio.create_task(self._resolve(nxt, state.ytm_only)))
+
+    @staticmethod
+    def _mark_busy(busy: bool):
+        try:
+            if busy:
+                with open(BUSY_FILE, "w") as f:
+                    f.write(str(int(time.time())))
+            elif os.path.exists(BUSY_FILE):
+                os.remove(BUSY_FILE)
+        except OSError as e:
+            print(f"[musicbot] Could not update {BUSY_FILE}: {e}")
 
     def _skip(self, state: GuildState, vc: discord.VoiceClient, to: int = 1):
         skipped = [state.queue.popleft() for _ in range(min(max(0, to - 1), len(state.queue)))]
@@ -200,9 +250,11 @@ class MusicCog(commands.Cog):
             state.recent_songs.append(key)
 
         self._start_prefetch(guild_id, state)
+        self._start_preload(state)
+        self._mark_busy(True)
 
         if announce and state.channel:
-            await self._retire_np(state)
+            await self._retire_np(state, delete=True)
             view = NowPlayingView(self, guild_id)
             try:
                 state.np_message = await state.channel.send(embed=build_np_embed(state, track), view=view)
@@ -292,10 +344,17 @@ class MusicCog(commands.Cog):
             state.current = next_track
             if next_track.is_resolved and not next_track.is_expired():
                 break
-            query = next_track.webpage_url or next_track.query
-            info = await self._fetch_track(query, ytm_only=state.ytm_only) if query else None
-            if info:
-                next_track.resolve(info)
+            pre = state._preload
+            if pre and pre[0] is next_track and not pre[1].done():
+                # Already being resolved in the background — let that finish.
+                state._preload = None
+                try:
+                    await asyncio.wait_for(asyncio.shield(pre[1]), timeout=30.0)
+                except Exception:
+                    pass
+                if next_track.is_resolved and not next_track.is_expired():
+                    break
+            if await self._resolve(next_track, state.ytm_only):
                 break
             await self._notify(state, f"⚠️ Couldn't find **{next_track.title}**, skipping...")
             state.current = None
@@ -486,6 +545,7 @@ class MusicCog(commands.Cog):
 
     def _set_autoplay(self, guild_id: int, state: GuildState, on: bool):
         state.autoplay = on
+        self._save_setting(guild_id, "autoplay", on)
         if on:
             self._start_prefetch(guild_id, state)  # don't wait for the next track to start
         else:
@@ -641,6 +701,7 @@ class MusicCog(commands.Cog):
                 await self._idle_check_guild(guild_id, state)
             except Exception as e:
                 print(f"[musicbot] Idle check failed for guild {guild_id}: {e!r}")
+        self._mark_busy(any(vc.is_playing() or vc.is_paused() for vc in self.bot.voice_clients))
 
     async def _idle_check_guild(self, guild_id: int, state: GuildState):
         guild = self.bot.get_guild(guild_id)
@@ -687,6 +748,7 @@ class MusicCog(commands.Cog):
     @tasks.loop(seconds=5)
     async def _progress_update(self):
         for guild_id, state in list(self.states.items()):
+            self._start_preload(state)  # picks up reorders (/move, /shuffle, /playnext)
             if not state.np_message or not state.current or state.radio_station:
                 continue
             guild = self.bot.get_guild(guild_id)
@@ -759,11 +821,9 @@ class MusicCog(commands.Cog):
         await interaction.response.defer()
 
         state = self.get_state(interaction.guild_id)
-        if state.radio_station:
-            return await interaction.followup.send(
-                "📻 Radio is active — use `/stop` to end it before queuing songs.", ephemeral=True)
         state.channel = interaction.channel
         vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
+        self._end_radio(state, vc)
         requester = interaction.user.display_name
         # A locked play_lock means a track change is underway; treat that as playing.
         already_playing = vc.is_playing() or vc.is_paused() or state.play_lock.locked()
@@ -868,11 +928,9 @@ class MusicCog(commands.Cog):
         await interaction.response.defer()
 
         state = self.get_state(interaction.guild_id)
-        if state.radio_station:
-            return await interaction.followup.send(
-                "📻 Radio is active — use `/stop` to end it before queuing songs.", ephemeral=True)
         state.channel = interaction.channel
         vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
+        self._end_radio(state, vc)
 
         track_info = await self._fetch_track(query, ytm_only=state.ytm_only)
         if not track_info:
@@ -956,15 +1014,30 @@ class MusicCog(commands.Cog):
         self._skip(self.get_state(interaction.guild_id), vc, to)
         await interaction.response.send_message("⏭️ Skipped.")
 
+    @staticmethod
+    def _parse_time(text: str) -> int | None:
+        """'90', '1:30' or '1:02:30' → seconds."""
+        parts = text.strip().split(":")
+        if not 1 <= len(parts) <= 3 or not all(p.isdigit() for p in parts):
+            return None
+        seconds = 0
+        for p in parts:
+            seconds = seconds * 60 + int(p)
+        return seconds
+
     @app_commands.command(name="seek", description="Seek to a position in the current track")
-    @app_commands.describe(seconds="Position to seek to in seconds")
+    @app_commands.describe(position="Where to jump to, e.g. 90 or 1:30")
     @app_commands.guild_only()
-    async def seek(self, interaction: discord.Interaction, seconds: int):
+    async def seek(self, interaction: discord.Interaction, position: str):
         if await self._deny_non_dj(interaction):
             return
         state = self.get_state(interaction.guild_id)
         if not state.current:
             return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        seconds = self._parse_time(position)
+        if seconds is None:
+            return await interaction.response.send_message(
+                "Use seconds or minutes:seconds, e.g. `90` or `1:30`.", ephemeral=True)
         if state.current.duration and seconds >= state.current.duration:
             return await interaction.response.send_message(
                 "Seek position is past the end of the track.", ephemeral=True)
@@ -997,6 +1070,24 @@ class MusicCog(commands.Cog):
         state.queue = deque(items)
         self._start_prefetch(interaction.guild_id, state)
         await interaction.response.send_message(f"🗑️ Removed **{removed.title}**.")
+
+    @app_commands.command(name="move", description="Move a track to another place in the queue")
+    @app_commands.describe(source="Current queue position of the track",
+                           target="New queue position (1 = plays next)")
+    @app_commands.guild_only()
+    async def move(self, interaction: discord.Interaction, source: int, target: int):
+        if await self._deny_non_dj(interaction):
+            return
+        state = self.get_state(interaction.guild_id)
+        n = len(state.queue)
+        if not (1 <= source <= n and 1 <= target <= n):
+            msg = "The queue is empty." if not n else f"Positions must be between 1 and {n}."
+            return await interaction.response.send_message(msg, ephemeral=True)
+        items = list(state.queue)
+        track = items.pop(source - 1)
+        items.insert(target - 1, track)
+        state.queue = deque(items)
+        await interaction.response.send_message(f"↕️ Moved **{track.title}** to position **{target}**.")
 
     @app_commands.command(name="clear", description="Clear the queue")
     @app_commands.guild_only()
@@ -1051,6 +1142,7 @@ class MusicCog(commands.Cog):
                 "Volume must be between 0 and 100.", ephemeral=True)
         state = self.get_state(interaction.guild_id)
         state.volume = level / 100
+        self._save_setting(interaction.guild_id, "volume", state.volume)
         vc = interaction.guild.voice_client
         if vc and isinstance(vc.source, discord.PCMVolumeTransformer):
             vc.source.volume = state.volume
@@ -1108,6 +1200,7 @@ class MusicCog(commands.Cog):
                     vc = await sel.user.voice.channel.connect(self_deaf=True)
                 else:
                     return await sel.followup.send("Join a voice channel first!", ephemeral=True)
+            self._end_radio(state, vc)
             state.queue.append(track)
             if vc.is_playing() or vc.is_paused() or state.play_lock.locked():
                 await sel.followup.send(f"➕ Added: **{track.title}** (#{len(state.queue)})")
@@ -1298,6 +1391,7 @@ class MusicCog(commands.Cog):
             self._schedule(self._radio_ended(guild_id, station, started))
 
         vc.play(source, after=after)
+        self._mark_busy(True)
 
     async def _radio_ended(self, guild_id: int, station: str, started: float):
         """Reconnect a dropped stream, backing off when it keeps dying straight away
@@ -1367,9 +1461,30 @@ class MusicCog(commands.Cog):
     playlist = app_commands.Group(name="playlist", description="Save and load custom playlists",
                                   guild_only=True)
 
+    @staticmethod
+    def _playlist_path(guild_id: int, name: str) -> str:
+        safe = name.replace(" ", "_").replace("/", "_")
+        return os.path.join(PLAYLISTS_DIR, f"{guild_id}_{safe}.json")
+
+    @staticmethod
+    def _playlist_names(guild_id: int) -> list[str]:
+        prefix = f"{guild_id}_"
+        files = [f for f in os.listdir(PLAYLISTS_DIR) if f.startswith(prefix) and f.endswith(".json")]
+        return sorted(f[len(prefix):-5].replace("_", " ") for f in files)
+
+    async def _playlist_autocomplete(self, interaction: discord.Interaction,
+                                     current: str) -> list[app_commands.Choice[str]]:
+        try:
+            return [
+                app_commands.Choice(name=n, value=n)
+                for n in self._playlist_names(interaction.guild_id) if current.lower() in n.lower()
+            ][:25]
+        except Exception:
+            return []
+
     @playlist.command(name="save", description="Save the current queue as a named playlist")
-    @app_commands.describe(name="Playlist name")
-    async def playlist_save(self, interaction: discord.Interaction, name: str):
+    @app_commands.describe(name="Playlist name", overwrite="Replace a playlist with the same name")
+    async def playlist_save(self, interaction: discord.Interaction, name: str, overwrite: bool = False):
         state = self.get_state(interaction.guild_id)
 
         def _save_url(t: Track) -> str:
@@ -1385,8 +1500,14 @@ class MusicCog(commands.Cog):
                 tracks.append({"title": t.title, "url": url})
         if not tracks:
             return await interaction.response.send_message("Nothing to save.", ephemeral=True)
-        safe = name.replace(" ", "_").replace("/", "_")
-        path = os.path.join(PLAYLISTS_DIR, f"{interaction.guild_id}_{safe}.json")
+        path = self._playlist_path(interaction.guild_id, name)
+        if os.path.exists(path):
+            if not overwrite:
+                return await interaction.response.send_message(
+                    f"A playlist named **{name}** already exists. "
+                    "Pick another name, or save again with `overwrite: True`.", ephemeral=True)
+            if await self._deny_non_dj(interaction):
+                return
         with open(path, "w") as f:
             json.dump({"name": name, "tracks": tracks}, f)
         await interaction.response.send_message(f"💾 Saved **{len(tracks)}** tracks as **{name}**.")
@@ -1394,8 +1515,7 @@ class MusicCog(commands.Cog):
     @playlist.command(name="load", description="Load a saved playlist into the queue")
     @app_commands.describe(name="Playlist name")
     async def playlist_load(self, interaction: discord.Interaction, name: str):
-        safe = name.replace(" ", "_").replace("/", "_")
-        path = os.path.join(PLAYLISTS_DIR, f"{interaction.guild_id}_{safe}.json")
+        path = self._playlist_path(interaction.guild_id, name)
         if not os.path.exists(path):
             return await interaction.response.send_message(
                 f"No playlist named **{name}**. Use `/playlist list` to see saved ones.",
@@ -1410,6 +1530,7 @@ class MusicCog(commands.Cog):
         state = self.get_state(interaction.guild_id)
         state.channel = interaction.channel
         vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
+        self._end_radio(state, vc)
 
         with open(path) as f:
             data = json.load(f)
@@ -1432,27 +1553,31 @@ class MusicCog(commands.Cog):
     @playlist_load.autocomplete("name")
     async def playlist_load_autocomplete(self, interaction: discord.Interaction,
                                          current: str) -> list[app_commands.Choice[str]]:
-        try:
-            prefix = f"{interaction.guild_id}_"
-            files = [f for f in os.listdir(PLAYLISTS_DIR)
-                     if f.startswith(prefix) and f.endswith(".json")]
-            names = [f[len(prefix):-5].replace("_", " ") for f in files]
-            return [
-                app_commands.Choice(name=n, value=n)
-                for n in names if current.lower() in n.lower()
-            ][:25]
-        except Exception:
-            return []
+        return await self._playlist_autocomplete(interaction, current)
+
+    @playlist.command(name="delete", description="Delete a saved playlist")
+    @app_commands.describe(name="Playlist name")
+    async def playlist_delete(self, interaction: discord.Interaction, name: str):
+        if await self._deny_non_dj(interaction):
+            return
+        path = self._playlist_path(interaction.guild_id, name)
+        if not os.path.exists(path):
+            return await interaction.response.send_message(
+                f"No playlist named **{name}**.", ephemeral=True)
+        os.remove(path)
+        await interaction.response.send_message(f"🗑️ Deleted playlist **{name}**.")
+
+    @playlist_delete.autocomplete("name")
+    async def playlist_delete_autocomplete(self, interaction: discord.Interaction,
+                                           current: str) -> list[app_commands.Choice[str]]:
+        return await self._playlist_autocomplete(interaction, current)
 
     @playlist.command(name="list", description="List all saved playlists for this server")
     async def playlist_list(self, interaction: discord.Interaction):
-        prefix = f"{interaction.guild_id}_"
-        files = [f for f in os.listdir(PLAYLISTS_DIR)
-                 if f.startswith(prefix) and f.endswith(".json")]
-        if not files:
+        names = self._playlist_names(interaction.guild_id)
+        if not names:
             return await interaction.response.send_message(
                 "No saved playlists for this server.", ephemeral=True)
-        names = [f[len(prefix):-5].replace("_", " ") for f in files]
         await interaction.response.send_message(
             "**Saved Playlists:**\n" + "\n".join(f"• {n}" for n in names))
 
@@ -1495,12 +1620,13 @@ class MusicCog(commands.Cog):
             "`/resume` — Resume playback\n"
             "`/stop` — Stop playback and clear the queue\n"
             "`/skip` — Skip to the next track\n"
-            "`/seek <seconds>` — Jump to a position in the current track\n"
+            "`/seek <time>` — Jump to a position in the current track (e.g. `90` or `1:30`)\n"
             "`/volume <0-100>` — Set playback volume"
         ), inline=False)
         embed.add_field(name="📋 Queue", value=(
             "`/queue` — Show the current queue\n"
             "`/remove <position>` — Remove a track from the queue\n"
+            "`/move <from> <to>` — Move a track to another place in the queue\n"
             "`/clear` — Clear all tracks from the queue\n"
             "`/shuffle` — Shuffle the queue\n"
             "`/loop <off|track|queue>` — Set loop mode"
@@ -1515,11 +1641,12 @@ class MusicCog(commands.Cog):
         embed.add_field(name="📻 Radio", value=(
             f"`/radio <station>` — Play a 24/7 live radio stream\n"
             f"Available stations: {stations}\n"
-            "Radio keeps the bot in channel even when alone. Use `/stop` or `/leave` to end it."
+            "Radio keeps the bot in channel even when alone. `/play`, `/stop` or `/leave` end it."
         ), inline=False)
         embed.add_field(name="💾 Playlists", value=(
             "`/playlist save <name>` — Save the current queue as a playlist\n"
             "`/playlist load <name>` — Load and play a saved playlist\n"
+            "`/playlist delete <name>` — Delete a saved playlist\n"
             "`/playlist list` — List all saved playlists for this server"
         ), inline=False)
         embed.add_field(name="🛡️ Admin", value=(

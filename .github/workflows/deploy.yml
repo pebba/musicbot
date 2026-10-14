@@ -53,6 +53,19 @@ jobs:
           [ -n "$DISCORD_WEBHOOK_URL" ] && echo "$DISCORD_WEBHOOK_URL" > .discord-webhook
           [ -n "$DISCORD_DM_USER_ID" ] && echo "$DISCORD_DM_USER_ID" > .discord-dm-user
 
+      # Don't cut a song off for a deploy: the bot keeps .busy fresh (every 30 s)
+      # while anyone is listening, so hold the restart until it is gone. A stale
+      # file means the bot is down. Give up after 2 h; manual runs don't wait.
+      - name: Wait until nobody is listening
+        if: steps.pull.outputs.changed == 'true' && github.event_name != 'workflow_dispatch'
+        run: |
+          for _ in $(seq 240); do
+            [ -f .busy ] || exit 0
+            [ $(( $(date +%s) - $(stat -c %Y .busy) )) -gt 120 ] && exit 0
+            sleep 30
+          done
+          echo "Still busy after 2 h, restarting anyway."
+
       # Skip on an hourly poll that found nothing — no point cutting playback.
       - name: Restart
         if: steps.pull.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'

@@ -61,3 +61,7 @@ PLAYLISTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playli
 
 # Per-guild settings (DJ role, YTM-only) that must survive restarts and deploys.
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "guild_settings.json")
+
+# Kept fresh while anyone is listening; the deploy workflow holds the restart
+# until it is gone or stale.
+BUSY_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".busy")

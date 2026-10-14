@@ -83,6 +83,7 @@ class GuildState:
         self.last_artist: str | None = None
         self.ytm_only: bool = False
         self._prefetch_task: asyncio.Task | None = None
+        self._preload: tuple[Track, asyncio.Task] | None = None  # next queued track being resolved
         # Held while play_next picks and starts a track, so a /play during a
         # slow transition cannot start a second track on top of it.
         self.play_lock = asyncio.Lock()
