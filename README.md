@@ -22,11 +22,12 @@ A self-hosted Discord music bot with YouTube Music, Spotify, live radio, autopla
 | `/pause` / `/resume` | Pause or resume playback |
 | `/stop` | Stop playback and clear the queue |
 | `/skip [n]` | Skip to the next track (or ahead to position n) |
-| `/seek <seconds>` | Jump to a position in the current track |
+| `/seek <time>` | Jump to a position in the current track (`90` or `1:30`) |
 | `/volume <0-100>` | Set playback volume |
 | `/nowplaying` | Show the currently playing track with progress bar |
 | `/queue` | Show the current queue |
 | `/remove <position>` | Remove a track from the queue |
+| `/move <from> <to>` | Move a track to another place in the queue |
 | `/clear` | Clear the queue |
 | `/shuffle` | Shuffle the queue |
 | `/loop [off\|track\|queue]` | Set loop mode |
@@ -36,6 +37,7 @@ A self-hosted Discord music bot with YouTube Music, Spotify, live radio, autopla
 | `/radio <station>` | Play a 24/7 live radio stream |
 | `/playlist save <name>` | Save the current queue as a playlist |
 | `/playlist load <name>` | Load a saved playlist |
+| `/playlist delete <name>` | Delete a saved playlist |
 | `/playlist list` | List saved playlists for this server |
 | `/join` / `/leave` | Join or leave a voice channel |
 | `/djrole <role>` | Restrict commands to a role (Manage Server required) |

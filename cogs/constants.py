@@ -12,21 +12,28 @@ YTDL_OPTIONS = {
 # YouTube Music search "Songs" tab filter — filters out videos, albums, artists, playlists
 YTM_SONGS_SP = "EgWKAQIIAWoKEAoQAxAEEAkQBQ%3D%3D"
 
-# Autoplay: max songs a track must "wait" before it's fully available again.
-# Scales down automatically for small artist pools (see _autoplay_next).
-AUTOPLAY_MAX_COOLDOWN = 10
+# Autoplay: how many recently played songs it will not pick again.
+AUTOPLAY_HISTORY = 30
+# Autoplay only picks from this many of the top-ranked search results for an
+# artist. Past that, the results turn into deep cuts nobody knows.
+AUTOPLAY_DEPTH = 15
+# Results to read from a YTM search for autoplay. A search is a paged playlist
+# of 400-600 entries, and reading all of it took 10-18 s on the server; the
+# first pages hold everything autoplay uses, with room for same-named acts.
+AUTOPLAY_SEARCH_LIMIT = 50
 
 # Autoplay title pre-filter: skip live recordings, karaoke, covers, etc.
 _AUTOPLAY_SKIP_RE = re.compile(
     r'\blive\s+(?:at|in|from|@)\b'       # "live at/in/from/@ …"
-    r'|\(\s*live\s*[\),]'                # "(live)" / "(live,"
-    r'|\[\s*live\s*[\],]'                # "[live]" / "[live,"
+    r'|[\(\[][^\)\]]*\blive\b'            # "live" anywhere in brackets: "(Live)", "(Live Projekt Revolution 2002)"
     r'|[-–—]\s*live\s*$'                 # "— live" at end of title
     r'|\bkaraoke\b'                      # any karaoke
     r'|\boriginally\s+performed\s+by\b'  # "originally performed by …"
     r'|\btribute\s+(?:to|band)\b'        # "tribute to" / "tribute band"
     r'|\b(?:guitar|piano|drums?)\s+cover\b'  # instrument cover
     r'|\binstrumental\b'                 # instrumental (no vocals) version
+    r'|\bdemo\b'                         # demo recordings
+    r'|\ba\s*cap+el+a\b'                 # a cappella / acapella version
     r'|\bacoustic\b',                    # acoustic version/session
     re.IGNORECASE
 )
@@ -41,7 +48,8 @@ _AUTOPLAY_DEPRIORITIZE_RE = re.compile(
     r'|\bslowed\b'           # slowed/reverb edits
     r'|\bnightcore\b'        # nightcore speed-ups
     r'|\bsped\s*up\b'        # sped-up versions
-    r'|\bradio\s+edit\b',    # radio edits (shortened)
+    r'|\bradio\s+edit\b'     # radio edits (shortened)
+    r'|\bremix\b',            # remixes
     re.IGNORECASE
 )
 
@@ -56,3 +64,10 @@ except (FileNotFoundError, json.JSONDecodeError) as e:
     RADIO_STATIONS: dict[str, str] = {}
 
 PLAYLISTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playlists")
+
+# Per-guild settings (DJ role, YTM-only) that must survive restarts and deploys.
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "guild_settings.json")
+
+# Kept fresh while anyone is listening; the deploy workflow holds the restart
+# until it is gone or stale.
+BUSY_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".busy")

@@ -1,9 +1,11 @@
 import asyncio
+import re
 import time
 from collections import deque
 
 import discord
 
+from .constants import AUTOPLAY_HISTORY
 from .utils import _extract_artist
 
 
@@ -49,6 +51,16 @@ class Track:
     def is_resolved(self) -> bool:
         return self.stream_url is not None
 
+    def is_expired(self) -> bool:
+        """True when the stream URL's own expiry (YouTube's run out after ~6 h)
+        would hit before this track finishes playing."""
+        if not self.stream_url:
+            return False
+        m = re.search(r"[?&/]expire[=/](\d+)", self.stream_url)
+        if not m:
+            return False
+        return int(m.group(1)) < time.time() + (self.duration or 0) + 60
+
 
 class GuildState:
     def __init__(self):
@@ -67,10 +79,17 @@ class GuildState:
         self.np_view = None  # NowPlayingView | None
         self.radio_station: str | None = None
         self.autoplay: bool = False
-        self.autoplay_weights: dict[str, int] = {}  # video_id → cooldown songs remaining
+        self.recent_songs: deque[str] = deque(maxlen=AUTOPLAY_HISTORY)  # song_key() of played tracks
         self.last_artist: str | None = None
         self.ytm_only: bool = False
         self._prefetch_task: asyncio.Task | None = None
+        self._preload: tuple[Track, asyncio.Task] | None = None  # next queued track being resolved
+        # Held while play_next picks and starts a track, so a /play during a
+        # slow transition cannot start a second track on top of it.
+        self.play_lock = asyncio.Lock()
+        self.skip_requested = False
+        self.fail_streak = 0  # tracks in a row that ended right after starting
+        self.radio_failures = 0
 
     def position(self) -> float:
         if self.start_time is None:

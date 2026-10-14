@@ -17,6 +17,8 @@ build/
 .cache
 .cache/
 playlists/
+guild_settings.json
+.busy
 *.log
 .discord-webhook
 .discord-dm-user
