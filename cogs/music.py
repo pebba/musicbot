@@ -4,6 +4,7 @@ import os
 import random
 import re
 import time
+import traceback
 import urllib.parse
 from collections import deque
 
@@ -25,6 +26,7 @@ from .constants import (
     FFMPEG_RECONNECT,
     PLAYLISTS_DIR,
     RADIO_STATIONS,
+    SETTINGS_FILE,
     YTDL_OPTIONS,
     YTM_SONGS_SP,
     _AUTOPLAY_DEPRIORITIZE_RE,
@@ -38,6 +40,7 @@ class MusicCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.states: dict[int, GuildState] = {}
+        self.settings: dict[str, dict] = self._load_settings()
         os.makedirs(PLAYLISTS_DIR, exist_ok=True)
         self._idle_check.start()
         self._progress_update.start()
@@ -48,15 +51,115 @@ class MusicCog(commands.Cog):
 
     def get_state(self, guild_id: int) -> GuildState:
         if guild_id not in self.states:
-            self.states[guild_id] = GuildState()
+            state = GuildState()
+            saved = self.settings.get(str(guild_id), {})
+            state.dj_role = saved.get("dj_role")
+            state.ytm_only = saved.get("ytm_only", False)
+            self.states[guild_id] = state
         return self.states[guild_id]
+
+    @staticmethod
+    def _load_settings() -> dict[str, dict]:
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_setting(self, guild_id: int, key: str, value):
+        self.settings.setdefault(str(guild_id), {})[key] = value
+        tmp = SETTINGS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.settings, f)
+        os.replace(tmp, SETTINGS_FILE)
 
     def _is_dj(self, interaction: discord.Interaction) -> bool:
         state = self.get_state(interaction.guild_id)
         if state.dj_role is None:
             return True
+        # Server managers always pass, so setting a role cannot lock them out.
+        if interaction.user.guild_permissions.manage_guild:
+            return True
         role = interaction.guild.get_role(state.dj_role)
         return role in interaction.user.roles if role else True
+
+    async def _deny_non_dj(self, interaction: discord.Interaction) -> bool:
+        """Tell non-DJs off and return True; return False when they may proceed."""
+        if self._is_dj(interaction):
+            return False
+        msg = "You need the DJ role to use this."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return True
+
+    async def cog_app_command_error(self, interaction: discord.Interaction,
+                                    error: app_commands.AppCommandError):
+        # The tree logs the traceback; this only makes sure the user is not left
+        # staring at "thinking..." forever.
+        msg = "⚠️ Something went wrong — please try again."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    # --- Shared helpers ---
+
+    def _schedule(self, coro):
+        """Run a coroutine from a voice player thread and log it if it fails —
+        otherwise the exception vanishes with the future and playback just stops."""
+        fut = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+        fut.add_done_callback(self._log_failure)
+
+    @staticmethod
+    def _log_failure(fut):
+        if not fut.cancelled() and fut.exception():
+            print("[musicbot] Background playback error:")
+            traceback.print_exception(fut.exception())
+
+    async def _notify(self, state: GuildState, text: str):
+        if not state.channel:
+            return
+        try:
+            await state.channel.send(text)
+        except discord.HTTPException as e:
+            print(f"[musicbot] Could not send to channel: {e}")
+
+    async def _retire_np(self, state: GuildState):
+        """Drop the buttons from the last now-playing message so only the
+        current one has live controls (and old views don't pile up in memory)."""
+        view, msg = state.np_view, state.np_message
+        state.np_view = None
+        state.np_message = None
+        if view:
+            view.stop()
+            if msg:
+                try:
+                    await msg.edit(view=None)
+                except discord.HTTPException:
+                    pass
+
+    def _clear_playback(self, state: GuildState):
+        self._cancel_prefetch(state)
+        state.queue.clear()
+        state.current = None
+        state.radio_station = None
+        state.skip_requested = False
+
+    def _skip(self, state: GuildState, vc: discord.VoiceClient, to: int = 1):
+        skipped = [state.queue.popleft() for _ in range(min(max(0, to - 1), len(state.queue)))]
+        if not state.radio_station:
+            if state.loop_mode == "queue":
+                # Keep the loop intact: current and skipped tracks go round again.
+                if state.current:
+                    state.queue.append(state.current)
+                state.queue.extend(skipped)
+            state.skip_requested = True
+        vc.stop()
 
     # --- Playback core ---
 
@@ -80,13 +183,14 @@ class MusicCog(commands.Cog):
             volume=state.volume,
         )
         state.start_time = time.time()
+        state.pause_start = None
         state.seek_offset = seek
         state.seek_to = None
 
         def after(error):
             if error:
                 print(f"[musicbot] Player error: {error}")
-            asyncio.run_coroutine_threadsafe(self.play_next(guild_id), self.bot.loop)
+            self._schedule(self.play_next(guild_id))
 
         vc.play(source, after=after)
 
@@ -98,18 +202,33 @@ class MusicCog(commands.Cog):
             state._prefetch_task = asyncio.create_task(self._prefetch_autoplay(guild_id))
 
         if announce and state.channel:
+            await self._retire_np(state)
             view = NowPlayingView(self, guild_id)
-            state.np_view = view
-            state.np_message = await state.channel.send(embed=build_np_embed(state, track), view=view)
+            try:
+                state.np_message = await state.channel.send(embed=build_np_embed(state, track), view=view)
+                state.np_view = view
+            except discord.HTTPException as e:
+                print(f"[musicbot] Could not post now-playing message: {e}")
+                view.stop()
 
     async def play_next(self, guild_id: int):
         state = self.get_state(guild_id)
+        async with state.play_lock:
+            await self._play_next_locked(guild_id, state)
+
+    async def _play_next_locked(self, guild_id: int, state: GuildState):
         guild = self.bot.get_guild(guild_id)
         if not guild:
             return
         vc = guild.voice_client
         if not vc:
             return
+        # A /play that raced this transition already started something.
+        if vc.is_playing() or vc.is_paused():
+            return
+
+        skipping = state.skip_requested
+        state.skip_requested = False
 
         # Pending seek: replay current track from a new position
         if state.seek_to is not None and state.current:
@@ -118,10 +237,27 @@ class MusicCog(commands.Cog):
             await self._play_track(guild_id, state.current, state, seek=seek_pos, announce=False)
             return
 
-        if state.loop_mode == "track" and state.current:
+        # A track that ends right after starting did not play at all (dead or
+        # expired stream). Stop after a few in a row instead of cycling through
+        # them and posting a now-playing message for each.
+        if state.current and state.start_time and not skipping:
+            if time.time() - state.start_time < 2:
+                state.fail_streak += 1
+            else:
+                state.fail_streak = 0
+            if state.fail_streak >= 5:
+                state.fail_streak = 0
+                state.current = None
+                state.start_time = None
+                await self._retire_np(state)
+                await self._notify(state, "⚠️ Several tracks in a row failed to play — stopped. "
+                                          "Use `/play` to try again.")
+                return
+
+        if state.loop_mode == "track" and state.current and not skipping:
             next_track = state.current
         else:
-            if state.loop_mode == "queue" and state.current:
+            if state.loop_mode == "queue" and state.current and not skipping:
                 state.queue.append(state.current)
             if state.queue:
                 next_track = state.queue.popleft()
@@ -141,29 +277,32 @@ class MusicCog(commands.Cog):
                         if not fetched:
                             state.current = None
                             state.start_time = None
-                            state.np_message = None
-                            state.np_view = None
+                            await self._retire_np(state)
                             return
                     next_track = state.queue.popleft()
                 else:
                     state.current = None
                     state.start_time = None
-                    state.np_message = None
-                    state.np_view = None
+                    await self._retire_np(state)
                     return
 
-        state.current = next_track
-
-        # Resolve lazy Spotify tracks just before playback.
-        if not next_track.is_resolved:
-            info = await self._fetch_track(next_track.query, ytm_only=state.ytm_only)
-            if not info:
-                if state.channel:
-                    await state.channel.send(f"⚠️ Couldn't find **{next_track.title}**, skipping...")
-                state.current = None
-                await self.play_next(guild_id)
+        # Resolve lazy tracks, and re-resolve looped ones whose stream URL expired.
+        while True:
+            state.current = next_track
+            if next_track.is_resolved and not next_track.is_expired():
+                break
+            query = next_track.webpage_url or next_track.query
+            info = await self._fetch_track(query, ytm_only=state.ytm_only) if query else None
+            if info:
+                next_track.resolve(info)
+                break
+            await self._notify(state, f"⚠️ Couldn't find **{next_track.title}**, skipping...")
+            state.current = None
+            if not state.queue:
+                state.start_time = None
+                await self._retire_np(state)
                 return
-            next_track.resolve(info)
+            next_track = state.queue.popleft()
 
         await self._play_track(guild_id, next_track, state, announce=True)
 
@@ -286,8 +425,15 @@ class MusicCog(commands.Cog):
             return [_track_query(track)]
 
         if "/album/" in url:
-            album = await loop.run_in_executor(None, lambda: sp.album_tracks(url))
-            return [_track_query(item) for item in album["items"] if item]
+            def _all_album_tracks():
+                page = sp.album_tracks(url)
+                items = list(page["items"])
+                while page.get("next"):  # the API pages at 50 tracks
+                    page = sp.next(page)
+                    items.extend(page["items"])
+                return items
+            items = await loop.run_in_executor(None, _all_album_tracks)
+            return [_track_query(item) for item in items if item]
 
         if "/playlist/" in url:
             # Spotify's API blocks playlist access for Client Credentials since 2024.
@@ -464,26 +610,49 @@ class MusicCog(commands.Cog):
     @tasks.loop(seconds=30)
     async def _idle_check(self):
         for guild_id, state in list(self.states.items()):
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                continue
-            vc = guild.voice_client
-            if not vc:
-                continue
-            humans = [m for m in vc.channel.members if not m.bot]
-            if not humans and not state.radio_station:
-                state.idle_ticks += 1
-                if state.idle_ticks >= 6:  # 3 min with no humans in channel
-                    await vc.disconnect()
-                    del self.states[guild_id]
-                continue
-            if vc.is_playing() or vc.is_paused() or state.queue or state.radio_station:
-                state.idle_ticks = 0
-            else:
-                state.idle_ticks += 1
-                if state.idle_ticks >= 10:  # 5 min idle
-                    await vc.disconnect()
-                    del self.states[guild_id]
+            # An exception escaping a tasks.loop ends it for good, so contain it per guild.
+            try:
+                await self._idle_check_guild(guild_id, state)
+            except Exception as e:
+                print(f"[musicbot] Idle check failed for guild {guild_id}: {e!r}")
+
+    async def _idle_check_guild(self, guild_id: int, state: GuildState):
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            return
+        vc = guild.voice_client
+        if not vc or not vc.channel:
+            return
+        humans = [m for m in vc.channel.members if not m.bot]
+        if not humans and not state.radio_station:
+            state.idle_ticks += 1
+            if state.idle_ticks >= 6:  # 3 min with no humans in channel
+                await self._idle_disconnect(guild_id, state, vc)
+            return
+        if vc.is_playing() or vc.is_paused() or state.queue or state.radio_station:
+            state.idle_ticks = 0
+        else:
+            state.idle_ticks += 1
+            if state.idle_ticks >= 10:  # 5 min idle
+                await self._idle_disconnect(guild_id, state, vc)
+
+    async def _idle_disconnect(self, guild_id: int, state: GuildState, vc: discord.VoiceClient):
+        self._clear_playback(state)
+        await vc.disconnect()
+        self.states.pop(guild_id, None)
+        await self._retire_np(state)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member,
+                                    before: discord.VoiceState, after: discord.VoiceState):
+        # The bot was disconnected (kicked, channel deleted, /leave): drop playback
+        # state so e.g. a stale radio station doesn't keep blocking /play.
+        if member.id != self.bot.user.id or after.channel is not None:
+            return
+        state = self.states.get(member.guild.id)
+        if state:
+            self._clear_playback(state)
+            await self._retire_np(state)
 
     @_idle_check.before_loop
     async def _before_idle_check(self):
@@ -501,7 +670,13 @@ class MusicCog(commands.Cog):
             if not vc or (not vc.is_playing() and not vc.is_paused()):
                 continue
             try:
-                await state.np_message.edit(embed=build_np_embed(state, state.current))
+                if state.np_view:
+                    # Also catches /pause, /loop etc. issued as commands rather than buttons.
+                    state.np_view._sync_buttons()
+                    await state.np_message.edit(embed=build_np_embed(state, state.current),
+                                                view=state.np_view)
+                else:
+                    await state.np_message.edit(embed=build_np_embed(state, state.current))
             except discord.NotFound:
                 state.np_message = None
             except Exception:
@@ -519,13 +694,17 @@ class MusicCog(commands.Cog):
         if not interaction.user.voice:
             return await interaction.response.send_message(
                 "You need to be in a voice channel.", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
+        # Connecting can take longer than the 3 s Discord gives an interaction.
+        await interaction.response.defer()
         ch = interaction.user.voice.channel
         vc = interaction.guild.voice_client
         if vc:
             await vc.move_to(ch)
         else:
             await ch.connect(self_deaf=True)
-        await interaction.response.send_message(f"Joined **{ch.name}**.")
+        await interaction.followup.send(f"Joined **{ch.name}**.")
 
     @app_commands.command(name="leave", description="Leave the voice channel and clear the queue")
     @app_commands.guild_only()
@@ -534,14 +713,13 @@ class MusicCog(commands.Cog):
         if not vc:
             return await interaction.response.send_message(
                 "I'm not in a voice channel.", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
         state = self.get_state(interaction.guild_id)
-        self._cancel_prefetch(state)
-        state.queue.clear()
-        state.current = None
-        state.radio_station = None
-        state.np_view = None
+        self._clear_playback(state)
         await vc.disconnect()
         await interaction.response.send_message("👋 Disconnected.")
+        await self._retire_np(state)
 
     @app_commands.command(name="play", description="Play a song or add it to the queue")
     @app_commands.describe(query="Song name, YouTube URL, or playlist URL")
@@ -550,6 +728,8 @@ class MusicCog(commands.Cog):
         if not interaction.user.voice:
             return await interaction.response.send_message(
                 "Join a voice channel first!", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
         await interaction.response.defer()
 
         state = self.get_state(interaction.guild_id)
@@ -559,7 +739,8 @@ class MusicCog(commands.Cog):
         state.channel = interaction.channel
         vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
         requester = interaction.user.display_name
-        already_playing = vc.is_playing() or vc.is_paused()
+        # A locked play_lock means a track change is underway; treat that as playing.
+        already_playing = vc.is_playing() or vc.is_paused() or state.play_lock.locked()
 
         # User is taking over — cancel prefetch and drop any autoplay-queued track
         if already_playing and state.autoplay:
@@ -656,6 +837,8 @@ class MusicCog(commands.Cog):
         if not interaction.user.voice:
             return await interaction.response.send_message(
                 "Join a voice channel first!", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
         await interaction.response.defer()
 
         state = self.get_state(interaction.guild_id)
@@ -672,7 +855,7 @@ class MusicCog(commands.Cog):
             return await interaction.followup.send(msg)
         track = Track(track_info, interaction.user.display_name)
 
-        if vc.is_playing() or vc.is_paused():
+        if vc.is_playing() or vc.is_paused() or state.play_lock.locked():
             # Cancel prefetch and drop autoplay-queued track so this song plays right after current
             if state.autoplay:
                 self._interrupt_autoplay(state)
@@ -683,6 +866,9 @@ class MusicCog(commands.Cog):
         else:
             state.queue.appendleft(track)
             await interaction.followup.send(f"Loading **{track.title}**...")
+        # Also covers a track change that was underway and ended with nothing to play;
+        # play_next returns at once if something is playing by the time it gets the lock.
+        if not vc.is_playing() and not vc.is_paused():
             await self.play_next(interaction.guild_id)
 
     @playnext.autocomplete("query")
@@ -693,6 +879,8 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="pause", description="Pause playback")
     @app_commands.guild_only()
     async def pause(self, interaction: discord.Interaction):
+        if await self._deny_non_dj(interaction):
+            return
         vc = interaction.guild.voice_client
         if vc and vc.is_playing():
             vc.pause()
@@ -704,6 +892,8 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="resume", description="Resume playback")
     @app_commands.guild_only()
     async def resume(self, interaction: discord.Interaction):
+        if await self._deny_non_dj(interaction):
+            return
         vc = interaction.guild.voice_client
         if vc and vc.is_paused():
             vc.resume()
@@ -718,37 +908,34 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="stop", description="Stop playback and clear the queue")
     @app_commands.guild_only()
     async def stop(self, interaction: discord.Interaction):
-        if not self._is_dj(interaction):
-            return await interaction.response.send_message(
-                "You need the DJ role to use this.", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
         state = self.get_state(interaction.guild_id)
-        self._cancel_prefetch(state)
-        state.queue.clear()
-        state.current = None
-        state.radio_station = None
-        state.np_view = None
+        self._clear_playback(state)
         vc = interaction.guild.voice_client
         if vc:
             vc.stop()
         await interaction.response.send_message("⏹️ Stopped and queue cleared.")
+        await self._retire_np(state)
 
     @app_commands.command(name="skip", description="Skip the current track")
     @app_commands.describe(to="Skip ahead to queue position N (default: next track)")
     @app_commands.guild_only()
     async def skip(self, interaction: discord.Interaction, to: int = 1):
+        if await self._deny_non_dj(interaction):
+            return
         vc = interaction.guild.voice_client
         if not vc or (not vc.is_playing() and not vc.is_paused()):
             return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
-        state = self.get_state(interaction.guild_id)
-        for _ in range(min(max(0, to - 1), len(state.queue))):
-            state.queue.popleft()
-        vc.stop()
+        self._skip(self.get_state(interaction.guild_id), vc, to)
         await interaction.response.send_message("⏭️ Skipped.")
 
     @app_commands.command(name="seek", description="Seek to a position in the current track")
     @app_commands.describe(seconds="Position to seek to in seconds")
     @app_commands.guild_only()
     async def seek(self, interaction: discord.Interaction, seconds: int):
+        if await self._deny_non_dj(interaction):
+            return
         state = self.get_state(interaction.guild_id)
         if not state.current:
             return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
@@ -773,6 +960,8 @@ class MusicCog(commands.Cog):
     @app_commands.describe(position="Queue position to remove (1 = next track)")
     @app_commands.guild_only()
     async def remove(self, interaction: discord.Interaction, position: int):
+        if await self._deny_non_dj(interaction):
+            return
         state = self.get_state(interaction.guild_id)
         if not 1 <= position <= len(state.queue):
             return await interaction.response.send_message(
@@ -785,15 +974,16 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="clear", description="Clear the queue")
     @app_commands.guild_only()
     async def clear(self, interaction: discord.Interaction):
-        if not self._is_dj(interaction):
-            return await interaction.response.send_message(
-                "You need the DJ role to use this.", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
         self.get_state(interaction.guild_id).queue.clear()
         await interaction.response.send_message("🗑️ Queue cleared.")
 
     @app_commands.command(name="shuffle", description="Shuffle the queue")
     @app_commands.guild_only()
     async def shuffle(self, interaction: discord.Interaction):
+        if await self._deny_non_dj(interaction):
+            return
         state = self.get_state(interaction.guild_id)
         if not state.queue:
             return await interaction.response.send_message("The queue is empty.", ephemeral=True)
@@ -811,6 +1001,8 @@ class MusicCog(commands.Cog):
     ])
     @app_commands.guild_only()
     async def loop(self, interaction: discord.Interaction, mode: str | None = None):
+        if await self._deny_non_dj(interaction):
+            return
         state = self.get_state(interaction.guild_id)
         if mode is None:
             cycle = ["off", "track", "queue"]
@@ -823,6 +1015,8 @@ class MusicCog(commands.Cog):
     @app_commands.describe(level="Volume level 0–100")
     @app_commands.guild_only()
     async def volume(self, interaction: discord.Interaction, level: int):
+        if await self._deny_non_dj(interaction):
+            return
         if not 0 <= level <= 100:
             return await interaction.response.send_message(
                 "Volume must be between 0 and 100.", ephemeral=True)
@@ -845,6 +1039,8 @@ class MusicCog(commands.Cog):
     @app_commands.describe(query="Search query")
     @app_commands.guild_only()
     async def search(self, interaction: discord.Interaction, query: str):
+        if await self._deny_non_dj(interaction):
+            return
         await interaction.response.defer()
         state = self.get_state(interaction.guild_id)
         results = await self._search(query, ytm_only=state.ytm_only)
@@ -862,6 +1058,8 @@ class MusicCog(commands.Cog):
         )
 
         async def on_pick(sel: discord.Interaction, result: dict):
+            if await self._deny_non_dj(sel):
+                return
             _state = self.get_state(sel.guild_id)
             vid = result.get("id", "")
             if _state.ytm_only and vid:
@@ -882,10 +1080,10 @@ class MusicCog(commands.Cog):
                 else:
                     return await sel.followup.send("Join a voice channel first!", ephemeral=True)
             state.queue.append(track)
+            if vc.is_playing() or vc.is_paused() or state.play_lock.locked():
+                await sel.followup.send(f"➕ Added: **{track.title}** (#{len(state.queue)})")
             if not vc.is_playing() and not vc.is_paused():
                 await self.play_next(sel.guild_id)
-            else:
-                await sel.followup.send(f"➕ Added: **{track.title}** (#{len(state.queue)})")
 
         await interaction.followup.send(embed=embed, view=SearchView(results, on_pick))
 
@@ -1000,10 +1198,17 @@ class MusicCog(commands.Cog):
         if not text:
             return await interaction.followup.send(f"No lyrics found for **{display}**.")
 
-        chunks = [text[i:i+1900] for i in range(0, min(len(text), 5700), 1900)]
-        await interaction.followup.send(f"**{display}**\n```{chunks[0]}```")
-        for chunk in chunks[1:]:
-            await interaction.followup.send(f"```{chunk}```")
+        for msg in self._lyrics_messages(display, text):
+            await interaction.followup.send(msg)
+
+    @staticmethod
+    def _lyrics_messages(display: str, text: str, limit: int = 5700) -> list[str]:
+        """Split lyrics into code-block messages under Discord's 2000-char cap."""
+        msgs = [f"```{text[i:i+1900]}```" for i in range(0, min(len(text), limit), 1900)]
+        msgs[0] = f"**{display}**\n{msgs[0]}"
+        if len(text) > limit:
+            msgs[-1] += "\n*(truncated)*"
+        return msgs
 
     # --- Admin commands ---
 
@@ -1013,11 +1218,11 @@ class MusicCog(commands.Cog):
     @app_commands.guild_only()
     async def djrole(self, interaction: discord.Interaction, role: discord.Role | None = None):
         state = self.get_state(interaction.guild_id)
+        state.dj_role = role.id if role else None
+        self._save_setting(interaction.guild_id, "dj_role", state.dj_role)
         if role is None:
-            state.dj_role = None
             await interaction.response.send_message("DJ role cleared — everyone can use all commands.")
         else:
-            state.dj_role = role.id
             await interaction.response.send_message(f"DJ role set to **{role.name}**.")
 
     @app_commands.command(name="ytmonly", description="Toggle strict YouTube Music mode — no YouTube fallback")
@@ -1026,6 +1231,7 @@ class MusicCog(commands.Cog):
     async def ytmonly(self, interaction: discord.Interaction):
         state = self.get_state(interaction.guild_id)
         state.ytm_only = not state.ytm_only
+        self._save_setting(interaction.guild_id, "ytm_only", state.ytm_only)
         if state.ytm_only:
             await interaction.response.send_message(
                 "🎵 **YouTube Music only mode enabled.** All searches, autoplay, and suggestions now use "
@@ -1040,28 +1246,50 @@ class MusicCog(commands.Cog):
 
     async def _start_radio(self, guild_id: int):
         state = self.get_state(guild_id)
-        if not state.radio_station:
+        station = state.radio_station
+        if not station:
             return
         guild = self.bot.get_guild(guild_id)
         if not guild:
             return
         vc = guild.voice_client
-        if not vc:
+        if not vc or vc.is_playing() or vc.is_paused():
             return
 
-        url = RADIO_STATIONS[state.radio_station]
+        url = RADIO_STATIONS[station]
         source = discord.PCMVolumeTransformer(
             discord.FFmpegPCMAudio(url, before_options=FFMPEG_RECONNECT, options="-vn"),
             volume=state.volume,
         )
+        started = time.time()
 
         def after(error):
             if error:
                 print(f"[musicbot] Radio error: {error}")
-            if state.radio_station:  # still in radio mode — reconnect
-                asyncio.run_coroutine_threadsafe(self._start_radio(guild_id), self.bot.loop)
+            self._schedule(self._radio_ended(guild_id, station, started))
 
         vc.play(source, after=after)
+
+    async def _radio_ended(self, guild_id: int, station: str, started: float):
+        """Reconnect a dropped stream, backing off when it keeps dying straight away
+        so a dead station URL cannot spin ffmpeg in a tight loop."""
+        state = self.get_state(guild_id)
+        if state.radio_station != station:
+            return  # stopped or switched station
+        if time.time() - started < 10:
+            state.radio_failures += 1
+        else:
+            state.radio_failures = 0
+        if state.radio_failures >= 5:
+            state.radio_station = None
+            state.radio_failures = 0
+            await self._notify(state, f"📻 **{station}** is not reachable right now — radio stopped.")
+            return
+        if state.radio_failures:
+            await asyncio.sleep(2 ** state.radio_failures)
+            if state.radio_station != station:
+                return
+        await self._start_radio(guild_id)
 
     @app_commands.command(name="radio", description="Play a 24/7 live radio station")
     @app_commands.describe(station="Radio station to play")
@@ -1074,23 +1302,25 @@ class MusicCog(commands.Cog):
         if not interaction.user.voice:
             return await interaction.response.send_message(
                 "Join a voice channel first!", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
+        await interaction.response.defer()
 
         state = self.get_state(interaction.guild_id)
         state.channel = interaction.channel
 
         # Stop anything currently playing and clear queue
+        self._clear_playback(state)  # also stops the old station from reconnecting
         vc = interaction.guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
-            state.radio_station = None  # prevent reconnect of old radio
             vc.stop()
-        state.queue.clear()
-        state.current = None
-        state.np_message = None
+        await self._retire_np(state)
 
         if not vc:
             await interaction.user.voice.channel.connect(self_deaf=True)
 
         state.radio_station = station
+        state.radio_failures = 0
         await self._start_radio(interaction.guild_id)
 
         embed = discord.Embed(
@@ -1101,11 +1331,12 @@ class MusicCog(commands.Cog):
         embed.add_field(name="Status", value="🔴 LIVE", inline=True)
         embed.add_field(name="Volume", value=f"{int(state.volume * 100)}%", inline=True)
         embed.set_footer(text=f"Started by {interaction.user.display_name} • Use /stop to end")
-        state.np_message = await interaction.response.send_message(embed=embed)
+        state.np_message = await interaction.followup.send(embed=embed)
 
     # --- Playlist subcommand group ---
 
-    playlist = app_commands.Group(name="playlist", description="Save and load custom playlists")
+    playlist = app_commands.Group(name="playlist", description="Save and load custom playlists",
+                                  guild_only=True)
 
     @playlist.command(name="save", description="Save the current queue as a named playlist")
     @app_commands.describe(name="Playlist name")
@@ -1143,6 +1374,8 @@ class MusicCog(commands.Cog):
         if not interaction.user.voice:
             return await interaction.response.send_message(
                 "Join a voice channel first!", ephemeral=True)
+        if await self._deny_non_dj(interaction):
+            return
 
         await interaction.response.defer()
         state = self.get_state(interaction.guild_id)
@@ -1164,7 +1397,7 @@ class MusicCog(commands.Cog):
             state.queue.append(t)
             added += 1
         await interaction.followup.send(f"📂 Loaded **{added}** tracks from **{name}**.")
-        if not vc.is_playing() and not vc.is_paused():
+        if not vc.is_playing() and not vc.is_paused() and state.queue:
             await self.play_next(interaction.guild_id)
 
     @playlist_load.autocomplete("name")
@@ -1197,6 +1430,8 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="autoplay", description="Toggle autoplay — queues a related track when the queue runs out")
     @app_commands.guild_only()
     async def autoplay(self, interaction: discord.Interaction):
+        if await self._deny_non_dj(interaction):
+            return
         state = self.get_state(interaction.guild_id)
         state.autoplay = not state.autoplay
         if state.autoplay:

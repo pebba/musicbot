@@ -97,6 +97,14 @@ class NowPlayingView(discord.ui.View):
         self.guild_id = guild_id
         self._sync_buttons()
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Showing the queue or lyrics is harmless; everything else is a playback
+        # control and follows the same DJ rule as the slash commands.
+        if interaction.data.get("custom_id") in (self.show_queue_btn.custom_id,
+                                                 self.show_lyrics_btn.custom_id):
+            return True
+        return not await self.cog._deny_non_dj(interaction)
+
     def _sync_buttons(self):
         state = self.cog.get_state(self.guild_id)
         guild = self.cog.bot.get_guild(self.guild_id)
@@ -154,21 +162,19 @@ class NowPlayingView(discord.ui.View):
         vc = guild.voice_client if guild else None
         if not vc or (not vc.is_playing() and not vc.is_paused()):
             return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
-        vc.stop()
+        self.cog._skip(self.cog.get_state(self.guild_id), vc)
         await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
 
     @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.secondary)
     async def stop_playback(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = self.cog.get_state(self.guild_id)
-        self.cog._cancel_prefetch(state)
-        state.queue.clear()
-        state.current = None
-        state.radio_station = None
+        self.cog._clear_playback(state)
         guild = self.cog.bot.get_guild(self.guild_id)
         vc = guild.voice_client if guild else None
         if vc:
             vc.stop()
         await interaction.response.send_message("⏹️ Stopped.", ephemeral=True)
+        await self.cog._retire_np(state)
 
     @discord.ui.button(emoji="🎲", style=discord.ButtonStyle.secondary)
     async def toggle_autoplay(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -223,7 +229,5 @@ class NowPlayingView(discord.ui.View):
         text = await self.cog._fetch_lyrics_text(artist, title)
         if not text:
             return await interaction.followup.send(f"No lyrics found for **{display}**.", ephemeral=True)
-        chunks = [text[i:i+1900] for i in range(0, min(len(text), 5700), 1900)]
-        await interaction.followup.send(f"**{display}**\n```{chunks[0]}```", ephemeral=True)
-        for chunk in chunks[1:]:
-            await interaction.followup.send(f"```{chunk}```", ephemeral=True)
+        for msg in self.cog._lyrics_messages(display, text):
+            await interaction.followup.send(msg, ephemeral=True)

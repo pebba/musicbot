@@ -5,8 +5,8 @@ import os
 
 load_dotenv()
 
+# Slash commands only — the privileged message_content intent is not needed.
 intents = discord.Intents.default()
-intents.message_content = True
 
 
 class MusicBot(commands.Bot):

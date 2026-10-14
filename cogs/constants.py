@@ -56,3 +56,6 @@ except (FileNotFoundError, json.JSONDecodeError) as e:
     RADIO_STATIONS: dict[str, str] = {}
 
 PLAYLISTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "playlists")
+
+# Per-guild settings (DJ role, YTM-only) that must survive restarts and deploys.
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "guild_settings.json")
