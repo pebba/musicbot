@@ -30,6 +30,21 @@ else
   echo "Cleanup cron installed — runs Sundays at 04:00."
 fi
 
+# --- JS runtime for yt-dlp ---
+# yt-dlp needs one for YouTube, or formats go missing. Installed to
+# /usr/local/bin so the systemd service finds it (~/.deno/bin is not on its PATH).
+if command -v deno >/dev/null; then
+  echo "deno already installed — update it with: sudo deno upgrade"
+else
+  sudo apt-get install -y unzip
+  tmp=$(mktemp -d)
+  curl -fsSL -o "$tmp/deno.zip" \
+    "https://github.com/denoland/deno/releases/latest/download/deno-$(uname -m)-unknown-linux-gnu.zip"
+  sudo unzip -o "$tmp/deno.zip" -d /usr/local/bin
+  rm -rf "$tmp"
+  echo "deno installed — update it with: sudo deno upgrade"
+fi
+
 # --- systemd units ---
 # The webhook URL / DM user ID are written by the deploy workflow on each push.
 sudo mkdir -p /etc/systemd/system/musicbot.service.d
