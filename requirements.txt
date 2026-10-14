@@ -15,6 +15,7 @@ python-dotenv==1.2.4
 typing_extensions==4.16.0
 yarl==1.25.1
 # Deliberately unpinned: update-ytdlp.yml upgrades this weekly, and a pin here
-# would downgrade it again on the next deploy.
-yt-dlp
+# would downgrade it again on the next deploy. [default] brings yt-dlp-ejs, the
+# script deno runs to solve YouTube's signature challenges, in a matching version.
+yt-dlp[default]
 spotipy==2.26.0
