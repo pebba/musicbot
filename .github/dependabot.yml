@@ -8,6 +8,11 @@ updates:
     groups:
       python-deps:
         patterns: ["*"]
+    # aiohttp pins multidict<7, so a multidict major makes requirements.txt
+    # uninstallable. Drop this once aiohttp allows 7.x.
+    ignore:
+      - dependency-name: multidict
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
