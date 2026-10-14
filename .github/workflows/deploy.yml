@@ -20,7 +20,11 @@ jobs:
         id: pull
         run: |
           before=$(git rev-parse HEAD)
-          git fetch origin main && git reset --hard origin/main
+          # HTTPS like the runner itself, so a blocked port 22 cannot stall
+          # deploys. Separate lines so a failed fetch stops the step under -e
+          # instead of falling through to pip with the old requirements.
+          git fetch "${{ github.server_url }}/${{ github.repository }}.git" +main:refs/remotes/origin/main
+          git reset --hard origin/main
           if [ "$before" = "$(git rev-parse HEAD)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
