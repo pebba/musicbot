@@ -610,10 +610,19 @@ class MusicCog(commands.Cog):
 
         current_key = song_key(track.title, track.artist)
         avoid = set(state.recent_songs) | {current_key}
+        pools = []
         for source in sources:
             entries = await self._radio_entries(source)
-            pool, weights = self._similar_candidates(entries or [], {source, current_vid},
-                                                     avoid, list(state.recent_artists))
+            pool, weights, varied = self._similar_candidates(entries or [], {source, current_vid},
+                                                             avoid, list(state.recent_artists))
+            pools.append((pool, weights, varied))
+            if varied:
+                break  # the next radio is only needed when this one lacks variety
+        # Prefer the first radio that still offers a different act: a seed like
+        # Taylor Swift has a radio of mostly her own songs, and once the other
+        # acts in it are used up it would play her six times in a row.
+        pools.sort(key=lambda p: not p[2])
+        for pool, weights, _ in pools:
             deadline = time.monotonic() + 10
             while pool and time.monotonic() < deadline:
                 i = random.choices(range(len(pool)), weights=weights, k=1)[0]
@@ -637,7 +646,8 @@ class MusicCog(commands.Cog):
 
     @staticmethod
     def _similar_candidates(entries: list[dict], skip_ids: set[str], avoid: set[str],
-                            recent_artists: list[frozenset[str]]) -> tuple[list[dict], list[float]]:
+                            recent_artists: list[frozenset[str]]
+                            ) -> tuple[list[dict], list[float], bool]:
         """Filter and weight radio entries. They come with channel and duration,
         so most filtering happens before any full extraction."""
         last_one = recent_artists[-1] if recent_artists else frozenset()
@@ -671,9 +681,10 @@ class MusicCog(commands.Cog):
                 w *= 0.1
             pool.append((e, w, bool(artists & last_one)))
         # Never the same act twice in a row while the radio offers another.
-        if any(not same for _, _, same in pool):
+        varied = any(not same for _, _, same in pool)
+        if varied:
             pool = [p for p in pool if not p[2]]
-        return [e for e, _, _ in pool], [w for _, w, _ in pool]
+        return [e for e, _, _ in pool], [w for _, w, _ in pool], varied
 
     async def _radio_entries(self, vid: str) -> list[dict] | None:
         hit = self._radio_cache.get(vid)
