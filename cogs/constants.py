@@ -17,6 +17,10 @@ AUTOPLAY_HISTORY = 30
 # Autoplay only picks from this many of the top-ranked search results for an
 # artist. Past that, the results turn into deep cuts nobody knows.
 AUTOPLAY_DEPTH = 15
+# Results to read from a YTM search for autoplay. A search is a paged playlist
+# of 400-600 entries, and reading all of it took 10-18 s on the server; the
+# first pages hold everything autoplay uses, with room for same-named acts.
+AUTOPLAY_SEARCH_LIMIT = 50
 
 # Autoplay title pre-filter: skip live recordings, karaoke, covers, etc.
 _AUTOPLAY_SKIP_RE = re.compile(
@@ -29,6 +33,7 @@ _AUTOPLAY_SKIP_RE = re.compile(
     r'|\btribute\s+(?:to|band)\b'        # "tribute to" / "tribute band"
     r'|\b(?:guitar|piano|drums?)\s+cover\b'  # instrument cover
     r'|\binstrumental\b'                 # instrumental (no vocals) version
+    r'|\ba\s*cappella\b'                 # a cappella version
     r'|\bacoustic\b',                    # acoustic version/session
     re.IGNORECASE
 )
@@ -43,7 +48,8 @@ _AUTOPLAY_DEPRIORITIZE_RE = re.compile(
     r'|\bslowed\b'           # slowed/reverb edits
     r'|\bnightcore\b'        # nightcore speed-ups
     r'|\bsped\s*up\b'        # sped-up versions
-    r'|\bradio\s+edit\b',    # radio edits (shortened)
+    r'|\bradio\s+edit\b'     # radio edits (shortened)
+    r'|\bremix\b',            # remixes
     re.IGNORECASE
 )
 

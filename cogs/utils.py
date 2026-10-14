@@ -56,18 +56,23 @@ def _autoplay_title_ok(title: str) -> bool:
 
 
 def _autoplay_artist_ok(expected: str, actual: str) -> bool:
-    """Return False when the fetched track's artist is clearly a different act.
-    Uses significant-word overlap so 'The Doors' won't pass for '3 Doors Down'."""
+    """True when one of the track's credited artists is the expected act.
+    Compared per credited artist, so 'Taylor Swift, Seeb' passes for Taylor
+    Swift while same-named acts don't: 'Wanda Jackson' for Wanda, 'C.R.O' for
+    CRO, '3 Doors Down' for The Doors."""
     if not actual:
         return True  # no metadata — give it the benefit of the doubt
     stop = {"the", "a", "an", "and", "&", "feat", "ft", "x", "vs", "with", "of"}
 
     def sig(s):
-        return {w.lower() for w in re.split(r"[\s,/]+", s)
+        return {w.lower() for w in re.split(r"[\s/]+", s)
                 if w.lower() not in stop and len(w) > 1}
 
     exp = sig(expected)
-    act = sig(actual)
     if not exp:
         return True
-    return len(exp & act) / len(exp) > 0.5
+    for credited in re.split(r",|&|\bfeat\.?|\bft\.?|\bx\b|\bvs\.?", actual, flags=re.IGNORECASE):
+        act = sig(credited)
+        if act and len(exp & act) / len(exp | act) >= 0.6:
+            return True
+    return False

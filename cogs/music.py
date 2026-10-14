@@ -23,6 +23,7 @@ except ImportError:
 
 from .constants import (
     AUTOPLAY_DEPTH,
+    AUTOPLAY_SEARCH_LIMIT,
     BUSY_FILE,
     FFMPEG_RECONNECT,
     PLAYLISTS_DIR,
@@ -43,6 +44,9 @@ class MusicCog(commands.Cog):
         self.states: dict[int, GuildState] = {}
         self.settings: dict[str, dict] = self._load_settings()
         self._ytm_cache: dict[str, tuple[float, list[dict]]] = {}
+        # Per searched artist: video ids autoplay fetched and found to be by
+        # someone else (or live, too long...), so later picks skip them unfetched.
+        self._ytm_rejects: dict[str, set[str]] = {}
         os.makedirs(PLAYLISTS_DIR, exist_ok=True)
         self._idle_check.start()
         self._progress_update.start()
@@ -390,7 +394,9 @@ class MusicCog(commands.Cog):
         """Search YouTube Music for the query and return the first song result.
         Falls back to regular YouTube search unless ytm_only is True."""
         loop = asyncio.get_running_loop()
-        opts = {**YTDL_OPTIONS, "extract_flat": True}
+        # Searches are paged playlists of hundreds of entries; without a limit
+        # yt-dlp reads every page before returning (15 s instead of ~2 s).
+        opts = {**YTDL_OPTIONS, "extract_flat": True, "playlistend": 5}
 
         # YouTube Music "Songs" tab search — sp filter restricts to songs only
         ytm_url = f"https://music.youtube.com/search?q={urllib.parse.quote(query)}&sp={YTM_SONGS_SP}"
@@ -432,7 +438,7 @@ class MusicCog(commands.Cog):
         return None
 
     async def _search(self, query: str, count: int = 10, ytm_only: bool = False) -> list[dict]:
-        opts = {**YTDL_OPTIONS, "extract_flat": True}
+        opts = {**YTDL_OPTIONS, "extract_flat": True, "playlistend": count}
         loop = asyncio.get_running_loop()
         if ytm_only:
             ytm_url = f"https://music.youtube.com/search?q={urllib.parse.quote(query)}&sp={YTM_SONGS_SP}"
@@ -603,10 +609,13 @@ class MusicCog(commands.Cog):
         # Their order is the ranking signal: the top is what the artist is known
         # for, the tail is deep cuts. Keep one entry per song, best-ranked first.
         current_key = song_key(track.title, track.artist)
+        rejects = self._ytm_rejects.setdefault(artist.lower(), set())
         seen: set[str] = set()
         ranked = []
         for e in entries:
             if e.get("ie_key") != "Youtube" or not e.get("id") or e["id"] == current_id:
+                continue
+            if e["id"] in rejects:
                 continue
             if not _autoplay_title_ok(e.get("title", "")):
                 continue
@@ -638,8 +647,10 @@ class MusicCog(commands.Cog):
             for rank, e, _ in pool
         ]
 
-        # Each try is a full extraction, so cap them to keep the gap short.
-        for _ in range(min(4, len(pool))):
+        # Each try is a full extraction (~1 s on the server). Names shared with
+        # other acts (CRO / C.R.O, Wanda / Wanda Jackson) can fill the top of the
+        # results, so allow a few; rejects are remembered and not fetched again.
+        for _ in range(min(8, len(pool))):
             i = random.choices(range(len(pool)), weights=weights, k=1)[0]
             _, chosen, _ = pool.pop(i)
             weights.pop(i)
@@ -652,12 +663,11 @@ class MusicCog(commands.Cog):
                 continue
             # Only the full info has these: the real title ("live" etc.), the
             # artist, and the duration (skip intros/teasers and full-album uploads).
-            if not _autoplay_title_ok(info.get("title", "")):
-                continue
-            if not _autoplay_artist_ok(artist, _extract_artist(info)):
-                continue
             duration = info.get("duration") or 0
-            if duration and not 60 <= duration <= 900:
+            if (not _autoplay_title_ok(info.get("title", ""))
+                    or not _autoplay_artist_ok(artist, _extract_artist(info))
+                    or (duration and not 60 <= duration <= 900)):
+                rejects.add(chosen["id"])
                 continue
             if song_key(info.get("title", ""), _extract_artist(info)) in avoid:
                 continue
@@ -677,7 +687,8 @@ class MusicCog(commands.Cog):
         ytm_url = f"https://music.youtube.com/search?q={urllib.parse.quote(query)}&sp={YTM_SONGS_SP}"
         loop = asyncio.get_running_loop()
         try:
-            with yt_dlp.YoutubeDL({**YTDL_OPTIONS, "extract_flat": True}) as ydl:
+            opts = {**YTDL_OPTIONS, "extract_flat": True, "playlistend": AUTOPLAY_SEARCH_LIMIT}
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 results = await loop.run_in_executor(
                     None, lambda: ydl.extract_info(ytm_url, download=False)
                 )
@@ -685,6 +696,7 @@ class MusicCog(commands.Cog):
             print(f"[musicbot] Autoplay YTM error: {e}")
             return None
         entries = list(results.get("entries") or [])
+        self._ytm_rejects.pop(key, None)  # fresh results, fresh verdicts
         self._ytm_cache.pop(key, None)
         self._ytm_cache[key] = (time.time(), entries)
         if len(self._ytm_cache) > 200:
