@@ -34,7 +34,14 @@ from .constants import (
     _AUTOPLAY_DEPRIORITIZE_RE,
 )
 from .models import GuildState, Track
-from .utils import _autoplay_artist_ok, _autoplay_title_ok, _extract_artist, fmt_dur, song_key
+from .utils import (
+    _autoplay_artist_ok,
+    _autoplay_title_ok,
+    _extract_artist,
+    artist_key,
+    fmt_dur,
+    song_key,
+)
 from .views import NowPlayingView, SearchView, build_np_embed, build_queue_embed
 
 
@@ -49,6 +56,8 @@ class MusicCog(commands.Cog):
         self._ytm_rejects: dict[str, set[str]] = {}
         # Per searched artist: video ids confirmed to be that artist's songs.
         self._ytm_good: dict[str, set[str]] = {}
+        # YTM "radio" (similar songs) per seed video id, cached for an hour.
+        self._radio_cache: dict[str, tuple[float, list[dict]]] = {}
         os.makedirs(PLAYLISTS_DIR, exist_ok=True)
         self._idle_check.start()
         self._progress_update.start()
@@ -65,6 +74,7 @@ class MusicCog(commands.Cog):
             state.ytm_only = saved.get("ytm_only", False)
             state.volume = saved.get("volume", state.volume)
             state.autoplay = saved.get("autoplay", False)
+            state.autoplay_mode = saved.get("autoplay_mode", "similar")
             self.states[guild_id] = state
         return self.states[guild_id]
 
@@ -254,6 +264,12 @@ class MusicCog(commands.Cog):
         key = song_key(track.title, track.artist)
         if key and (not state.recent_songs or state.recent_songs[-1] != key):
             state.recent_songs.append(key)
+            artists = {artist_key(track.artist)}
+            if " - " in track.title:  # "Artist - Title" uploads on a label's channel
+                artists.add(artist_key(track.title.split(" - ", 1)[0]))
+            state.recent_artists.append(frozenset(artists - {""}))
+        if track.requester != "Autoplay 🎲" and "v=" in track.webpage_url:
+            state.radio_seed = track.webpage_url.split("v=")[-1].split("&")[0]
 
         self._start_prefetch(guild_id, state)
         self._start_preload(state)
@@ -570,6 +586,129 @@ class MusicCog(commands.Cog):
         state.queue = deque(t for t in state.queue if t.requester != "Autoplay 🎲")
 
     async def _autoplay_next(self, state: GuildState) -> bool:
+        """Queue the next autoplay track according to the server's autoplay mode."""
+        if state.autoplay_mode == "similar" and await self._autoplay_similar(state):
+            return True
+        # Artist mode, and the fallback when the radio comes back empty.
+        return await self._autoplay_artist(state)
+
+    async def _autoplay_similar(self, state: GuildState) -> bool:
+        """Queue a related song, often by a related artist, from YouTube Music's
+        radio — what the YTM app plays next itself.
+
+        The radio is taken from the last track a person queued, not from the
+        last autoplay pick: chaining radio to radio drifted far within a few
+        songs on the server (Wanda to AC/DC, Bilderbuch to Nightwish). Only
+        once that radio is used up does it continue from the current track."""
+        track = state.current
+        if not track or "v=" not in track.webpage_url:
+            return False
+        current_vid = track.webpage_url.split("v=")[-1].split("&")[0]
+        sources = [state.radio_seed or current_vid]
+        if sources[0] != current_vid:
+            sources.append(current_vid)
+
+        current_key = song_key(track.title, track.artist)
+        avoid = set(state.recent_songs) | {current_key}
+        pools = []
+        for source in sources:
+            entries = await self._radio_entries(source)
+            pool, weights, varied = self._similar_candidates(entries or [], {source, current_vid},
+                                                             avoid, list(state.recent_artists))
+            pools.append((pool, weights, varied))
+            if varied:
+                break  # the next radio is only needed when this one lacks variety
+        # Prefer the first radio that still offers a different act: a seed like
+        # Taylor Swift has a radio of mostly her own songs, and once the other
+        # acts in it are used up it would play her six times in a row.
+        pools.sort(key=lambda p: not p[2])
+        for pool, weights, _ in pools:
+            deadline = time.monotonic() + 10
+            while pool and time.monotonic() < deadline:
+                i = random.choices(range(len(pool)), weights=weights, k=1)[0]
+                chosen = pool.pop(i)
+                weights.pop(i)
+                try:
+                    info = await self._fetch_info(f"https://music.youtube.com/watch?v={chosen['id']}")
+                    if "entries" in info:
+                        info = info["entries"][0]
+                except Exception as e:
+                    print(f"[musicbot] Autoplay fetch error: {e}")
+                    continue
+                duration = info.get("duration") or 0
+                if (not _autoplay_title_ok(info.get("title", ""))
+                        or (duration and not 60 <= duration <= 900)
+                        or song_key(info.get("title", ""), _extract_artist(info)) in avoid):
+                    continue
+                state.queue.append(Track(info, "Autoplay 🎲"))
+                return True
+        return False
+
+    @staticmethod
+    def _similar_candidates(entries: list[dict], skip_ids: set[str], avoid: set[str],
+                            recent_artists: list[frozenset[str]]
+                            ) -> tuple[list[dict], list[float], bool]:
+        """Filter and weight radio entries. They come with channel and duration,
+        so most filtering happens before any full extraction."""
+        last_one = recent_artists[-1] if recent_artists else frozenset()
+        last_two = frozenset().union(*recent_artists[-2:])
+        earlier = frozenset().union(*recent_artists)
+        seen: set[str] = set()
+        pool = []
+        for rank, e in enumerate(entries):
+            title = e.get("title") or ""
+            if not e.get("id") or e["id"] in skip_ids or not _autoplay_title_ok(title):
+                continue
+            duration = e.get("duration") or 0
+            if duration and not 60 <= duration <= 900:
+                continue
+            channel = e.get("channel") or e.get("uploader") or ""
+            key = song_key(title, channel)
+            if key in seen or key in avoid:
+                continue
+            seen.add(key)
+            artists = {artist_key(channel)}
+            if " - " in title:
+                artists.add(artist_key(title.split(" - ", 1)[0]))
+            # The radio leads with the seed artist; push towards other acts so
+            # it actually moves on, without banning the artist outright.
+            w = 0.95 ** rank
+            if artists & last_two:
+                w *= 0.15
+            elif artists & earlier:
+                w *= 0.5
+            if _AUTOPLAY_DEPRIORITIZE_RE.search(title):
+                w *= 0.1
+            pool.append((e, w, bool(artists & last_one)))
+        # Never the same act twice in a row while the radio offers another.
+        varied = any(not same for _, _, same in pool)
+        if varied:
+            pool = [p for p in pool if not p[2]]
+        return [e for e, _, _ in pool], [w for _, w, _ in pool], varied
+
+    async def _radio_entries(self, vid: str) -> list[dict] | None:
+        hit = self._radio_cache.get(vid)
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+        url = f"https://music.youtube.com/watch?v={vid}&list=RDAMVM{vid}"
+        loop = asyncio.get_running_loop()
+        try:
+            # The radio is endless; the first 50 stay close to the seed.
+            opts = {**YTDL_OPTIONS, "extract_flat": True, "noplaylist": False, "playlistend": 50}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                results = await loop.run_in_executor(
+                    None, lambda: ydl.extract_info(url, download=False)
+                )
+        except Exception as e:
+            print(f"[musicbot] Autoplay radio error: {e}")
+            return None
+        entries = list(results.get("entries") or [])
+        self._radio_cache[vid] = (time.time(), entries)
+        if len(self._radio_cache) > 200:
+            self._radio_cache.pop(next(iter(self._radio_cache)))
+        return entries
+
+    async def _autoplay_artist(self, state: GuildState) -> bool:
         """Queue one well-known song by the same artist via YTM that wasn't played recently."""
         track = state.current
         if not track:
@@ -1621,16 +1760,29 @@ class MusicCog(commands.Cog):
         await interaction.response.send_message(
             "**Saved Playlists:**\n" + "\n".join(f"• {n}" for n in names))
 
-    @app_commands.command(name="autoplay", description="Toggle autoplay — queues a related track when the queue runs out")
+    @app_commands.command(name="autoplay", description="Toggle autoplay, or choose what it plays")
+    @app_commands.describe(mode="What autoplay picks (omit to just toggle it on/off)")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="similar — related artists, same vibe", value="similar"),
+        app_commands.Choice(name="artist — more from the same artist", value="artist"),
+    ])
     @app_commands.guild_only()
-    async def autoplay(self, interaction: discord.Interaction):
+    async def autoplay(self, interaction: discord.Interaction, mode: str | None = None):
         if await self._deny_non_dj(interaction):
             return
         state = self.get_state(interaction.guild_id)
-        self._set_autoplay(interaction.guild_id, state, not state.autoplay)
+        if mode:
+            state.autoplay_mode = mode
+            self._save_setting(interaction.guild_id, "autoplay_mode", mode)
+            self._interrupt_autoplay(state)  # drop a pick made in the old mode
+            self._set_autoplay(interaction.guild_id, state, True)
+        else:
+            self._set_autoplay(interaction.guild_id, state, not state.autoplay)
         if state.autoplay:
+            what = ("related artists and songs" if state.autoplay_mode == "similar"
+                    else "more from the same artist")
             await interaction.response.send_message(
-                "🎲 Autoplay **enabled** — a related track will queue when the list runs out.")
+                f"🎲 Autoplay **enabled** — {what} when the queue runs out.")
         else:
             await interaction.response.send_message("🎲 Autoplay **disabled**.")
 
@@ -1675,7 +1827,8 @@ class MusicCog(commands.Cog):
             "`/nowplaying` — Show the currently playing track with progress bar\n"
             "`/search <query>` — Search YouTube and pick from 10 results\n"
             "`/lyrics [song]` — Fetch lyrics for the current or a specified track\n"
-            "`/autoplay` — Toggle autoplay (queues a related track when the queue is empty)"
+            "`/autoplay [mode]` — Toggle autoplay; mode `similar` plays related artists, "
+            "`artist` more from the same artist"
         ), inline=False)
         stations = ", ".join(RADIO_STATIONS.keys())
         embed.add_field(name="📻 Radio", value=(

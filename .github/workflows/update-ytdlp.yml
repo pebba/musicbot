@@ -14,7 +14,7 @@ jobs:
           cd /home/serverboi/musicbot
           source venv/bin/activate
           old=$(pip show yt-dlp | grep Version)
-          pip install -U yt-dlp -q
+          pip install -U "yt-dlp[default]" -q
           new=$(pip show yt-dlp | grep Version)
           if [ "$old" != "$new" ]; then
             echo "Updated: $old -> $new"
