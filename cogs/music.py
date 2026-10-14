@@ -649,8 +649,10 @@ class MusicCog(commands.Cog):
 
         # Each try is a full extraction (~1 s on the server). Names shared with
         # other acts (CRO / C.R.O, Wanda / Wanda Jackson) can fill the top of the
-        # results, so allow a few; rejects are remembered and not fetched again.
-        for _ in range(min(8, len(pool))):
+        # results, so keep trying for a while — this normally runs in the
+        # background during the current song. Rejects are not fetched again.
+        deadline = time.monotonic() + 15
+        while pool and time.monotonic() < deadline:
             i = random.choices(range(len(pool)), weights=weights, k=1)[0]
             _, chosen, _ = pool.pop(i)
             weights.pop(i)

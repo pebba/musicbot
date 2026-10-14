@@ -25,14 +25,14 @@ AUTOPLAY_SEARCH_LIMIT = 50
 # Autoplay title pre-filter: skip live recordings, karaoke, covers, etc.
 _AUTOPLAY_SKIP_RE = re.compile(
     r'\blive\s+(?:at|in|from|@)\b'       # "live at/in/from/@ …"
-    r'|\(\s*live\s*[\),]'                # "(live)" / "(live,"
-    r'|\[\s*live\s*[\],]'                # "[live]" / "[live,"
+    r'|[\(\[][^\)\]]*\blive\b'            # "live" anywhere in brackets: "(Live)", "(Live Projekt Revolution 2002)"
     r'|[-–—]\s*live\s*$'                 # "— live" at end of title
     r'|\bkaraoke\b'                      # any karaoke
     r'|\boriginally\s+performed\s+by\b'  # "originally performed by …"
     r'|\btribute\s+(?:to|band)\b'        # "tribute to" / "tribute band"
     r'|\b(?:guitar|piano|drums?)\s+cover\b'  # instrument cover
     r'|\binstrumental\b'                 # instrumental (no vocals) version
+    r'|\bdemo\b'                         # demo recordings
     r'|\ba\s*cappella\b'                 # a cappella version
     r'|\bacoustic\b',                    # acoustic version/session
     re.IGNORECASE
