@@ -80,6 +80,8 @@ class GuildState:
         self.radio_station: str | None = None
         self.autoplay: bool = False
         self.recent_songs: deque[str] = deque(maxlen=AUTOPLAY_HISTORY)  # song_key() of played tracks
+        self.recent_artists: deque[frozenset[str]] = deque(maxlen=4)  # artist_key()s per played track
+        self.autoplay_mode = "similar"  # "similar": related artists via YTM radio; "artist": same artist
         self.last_artist: str | None = None
         self.ytm_only: bool = False
         self._prefetch_task: asyncio.Task | None = None

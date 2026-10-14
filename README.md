@@ -6,7 +6,7 @@ A self-hosted Discord music bot with YouTube Music, Spotify, live radio, autopla
 
 - **YouTube & YouTube Music** — play songs, albums, and playlists by name or URL
 - **Spotify** — play tracks and albums via URL (playlists via yt-dlp fallback)
-- **Autoplay** — automatically queues related songs when the queue runs out, with cooldown and popularity weighting to avoid repetition
+- **Autoplay** — automatically queues songs when the queue runs out: related artists with the same vibe (`similar`, default) or more from the same artist (`artist`), without repeating songs or versions
 - **Live Radio** — built-in radio streams
 - **Lyrics** — fetches lyrics via lrclib.net with lyrics.ovh as fallback
 - **Playlists** — save and load per-server playlists
@@ -33,7 +33,7 @@ A self-hosted Discord music bot with YouTube Music, Spotify, live radio, autopla
 | `/loop [off\|track\|queue]` | Set loop mode |
 | `/search <query>` | Search and pick from results |
 | `/lyrics [song]` | Fetch lyrics for the current or a specified song |
-| `/autoplay` | Toggle autoplay |
+| `/autoplay [mode]` | Toggle autoplay, or set its mode: `similar` (related artists) or `artist` (same artist) |
 | `/radio <station>` | Play a 24/7 live radio stream |
 | `/playlist save <name>` | Save the current queue as a playlist |
 | `/playlist load <name>` | Load a saved playlist |

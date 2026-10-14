@@ -51,6 +51,14 @@ def song_key(title: str, artist: str = "") -> str:
     return t or (title or "").lower().strip()
 
 
+def artist_key(name: str) -> str:
+    """Normalise an artist or channel name so 'Seiler und Speer - Topic',
+    'BILDERBUCH' and 'TheHootersVEVO' compare with the plain artist name."""
+    n = (name or "").lower().removesuffix(" - topic")
+    n = re.sub(r"vevo$|\bofficial\b", "", n)
+    return re.sub(r"[^\w]", "", n)
+
+
 def _autoplay_title_ok(title: str) -> bool:
     return not _AUTOPLAY_SKIP_RE.search(title or "")
 
