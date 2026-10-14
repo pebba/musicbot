@@ -22,7 +22,7 @@ except ImportError:
     _SPOTIPY_AVAILABLE = False
 
 from .constants import (
-    AUTOPLAY_MAX_COOLDOWN,
+    AUTOPLAY_DEPTH,
     FFMPEG_RECONNECT,
     PLAYLISTS_DIR,
     RADIO_STATIONS,
@@ -32,7 +32,7 @@ from .constants import (
     _AUTOPLAY_DEPRIORITIZE_RE,
 )
 from .models import GuildState, Track
-from .utils import _autoplay_artist_ok, _autoplay_title_ok, _extract_artist, fmt_dur
+from .utils import _autoplay_artist_ok, _autoplay_title_ok, _extract_artist, fmt_dur, song_key
 from .views import NowPlayingView, SearchView, build_np_embed, build_queue_embed
 
 
@@ -41,6 +41,7 @@ class MusicCog(commands.Cog):
         self.bot = bot
         self.states: dict[int, GuildState] = {}
         self.settings: dict[str, dict] = self._load_settings()
+        self._ytm_cache: dict[str, tuple[float, list[dict]]] = {}
         os.makedirs(PLAYLISTS_DIR, exist_ok=True)
         self._idle_check.start()
         self._progress_update.start()
@@ -194,12 +195,11 @@ class MusicCog(commands.Cog):
 
         vc.play(source, after=after)
 
-        # Pre-fetch the next autoplay track in the background so it's ready
-        # the moment this track ends — avoids the search+extract gap between songs.
-        if state.autoplay and not state.queue and not state.radio_station:
-            if state._prefetch_task and not state._prefetch_task.done():
-                state._prefetch_task.cancel()
-            state._prefetch_task = asyncio.create_task(self._prefetch_autoplay(guild_id))
+        key = song_key(track.title, track.artist)
+        if key and (not state.recent_songs or state.recent_songs[-1] != key):
+            state.recent_songs.append(key)
+
+        self._start_prefetch(guild_id, state)
 
         if announce and state.channel:
             await self._retire_np(state)
@@ -266,9 +266,10 @@ class MusicCog(commands.Cog):
                     task = state._prefetch_task
                     state._prefetch_task = None
                     if task and not task.done():
-                        # Pre-fetch is still running — wait for it
+                        # Pre-fetch is still running — wait for it. Starting over
+                        # would only redo the same work, so be patient.
                         try:
-                            await asyncio.wait_for(asyncio.shield(task), timeout=8.0)
+                            await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
                         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                             task.cancel()
                     if not state.queue:
@@ -476,6 +477,20 @@ class MusicCog(commands.Cog):
         except Exception as e:
             print(f"[musicbot] Prefetch error: {e}")
 
+    def _start_prefetch(self, guild_id: int, state: GuildState):
+        """Pick the next autoplay track in the background while this one plays,
+        so it is ready the moment the track ends."""
+        if state.autoplay and state.current and not state.queue and not state.radio_station:
+            self._cancel_prefetch(state)
+            state._prefetch_task = asyncio.create_task(self._prefetch_autoplay(guild_id))
+
+    def _set_autoplay(self, guild_id: int, state: GuildState, on: bool):
+        state.autoplay = on
+        if on:
+            self._start_prefetch(guild_id, state)  # don't wait for the next track to start
+        else:
+            self._interrupt_autoplay(state)  # drop an already queued autoplay pick
+
     def _cancel_prefetch(self, state: GuildState):
         if state._prefetch_task and not state._prefetch_task.done():
             state._prefetch_task.cancel()
@@ -487,7 +502,7 @@ class MusicCog(commands.Cog):
         state.queue = deque(t for t in state.queue if t.requester != "Autoplay 🎲")
 
     async def _autoplay_next(self, state: GuildState) -> bool:
-        """Queue one song by the same artist via YTM, using a weight-based cooldown to vary picks."""
+        """Queue one well-known song by the same artist via YTM that wasn't played recently."""
         track = state.current
         if not track:
             return False
@@ -520,90 +535,101 @@ class MusicCog(commands.Cog):
         if "v=" in track.webpage_url:
             current_id = track.webpage_url.split("v=")[-1].split("&")[0]
 
-        ytm_url = f"https://music.youtube.com/search?q={urllib.parse.quote(artist)}&sp={YTM_SONGS_SP}"
-        loop = asyncio.get_running_loop()
-        opts = {**YTDL_OPTIONS, "extract_flat": True}
+        entries = await self._ytm_song_search(artist)
+        if not entries:
+            return False
 
+        # YTM search entries carry only id and title — no views, duration or artist.
+        # Their order is the ranking signal: the top is what the artist is known
+        # for, the tail is deep cuts. Keep one entry per song, best-ranked first.
+        current_key = song_key(track.title, track.artist)
+        seen: set[str] = set()
+        ranked = []
+        for e in entries:
+            if e.get("ie_key") != "Youtube" or not e.get("id") or e["id"] == current_id:
+                continue
+            if not _autoplay_title_ok(e.get("title", "")):
+                continue
+            key = song_key(e.get("title", ""), artist)
+            if key in seen:
+                continue
+            seen.add(key)
+            ranked.append((len(ranked), e, key))
+            if len(ranked) >= AUTOPLAY_DEPTH:
+                break
+        if not ranked:
+            return False
+
+        recent = list(state.recent_songs)
+        pool = [c for c in ranked if c[2] not in recent and c[2] != current_key]
+        avoid = set(recent) | {current_key}
+        if not pool:
+            # Every well-known song was played recently: repeat the ones heard
+            # longest ago rather than digging into the obscure tail.
+            last_played = {k: i for i, k in enumerate(recent)}
+            pool = sorted((c for c in ranked if c[2] != current_key),
+                          key=lambda c: last_played.get(c[2], -1))[:3]
+            avoid = {current_key}
+
+        # Steep rank decay (1.0, 0.8, 0.64 ... 0.04 at #15) so hits dominate;
+        # alternate versions (acoustic, slowed, ...) get a further × 0.1.
+        weights = [
+            0.8 ** rank * (0.1 if _AUTOPLAY_DEPRIORITIZE_RE.search(e.get("title", "")) else 1.0)
+            for rank, e, _ in pool
+        ]
+
+        # Each try is a full extraction, so cap them to keep the gap short.
+        for _ in range(min(4, len(pool))):
+            i = random.choices(range(len(pool)), weights=weights, k=1)[0]
+            _, chosen, _ = pool.pop(i)
+            weights.pop(i)
+            try:
+                info = await self._fetch_info(f"https://music.youtube.com/watch?v={chosen['id']}")
+                if "entries" in info:
+                    info = info["entries"][0]
+            except Exception as e:
+                print(f"[musicbot] Autoplay fetch error: {e}")
+                continue
+            # Only the full info has these: the real title ("live" etc.), the
+            # artist, and the duration (skip intros/teasers and full-album uploads).
+            if not _autoplay_title_ok(info.get("title", "")):
+                continue
+            if not _autoplay_artist_ok(artist, _extract_artist(info)):
+                continue
+            duration = info.get("duration") or 0
+            if duration and not 60 <= duration <= 900:
+                continue
+            if song_key(info.get("title", ""), _extract_artist(info)) in avoid:
+                continue
+            state.queue.append(Track(info, "Autoplay 🎲"))
+            state.last_artist = artist
+            return True
+
+        return False
+
+    async def _ytm_song_search(self, query: str) -> list[dict] | None:
+        """YTM "Songs" search, cached for an hour — autoplay stays on one artist,
+        so after the first pick this saves a round trip per song."""
+        key = query.lower()
+        hit = self._ytm_cache.get(key)
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+        ytm_url = f"https://music.youtube.com/search?q={urllib.parse.quote(query)}&sp={YTM_SONGS_SP}"
+        loop = asyncio.get_running_loop()
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with yt_dlp.YoutubeDL({**YTDL_OPTIONS, "extract_flat": True}) as ydl:
                 results = await loop.run_in_executor(
                     None, lambda: ydl.extract_info(ytm_url, download=False)
                 )
         except Exception as e:
             print(f"[musicbot] Autoplay YTM error: {e}")
-            return False
-
-        # Candidates: valid YTM song entries, excluding the current track, obvious non-studio content,
-        # and very short clips (< 60 s) which are typically teasers, trailers, or intros.
-        candidates = [
-            e for e in (results.get("entries") or [])
-            if e.get("ie_key") == "Youtube"
-            and e.get("id")
-            and e["id"] != current_id
-            and _autoplay_title_ok(e.get("title", ""))
-            and (e.get("duration") or 999) >= 60
-        ]
-        if not candidates:
-            return False
-
-        # --- Weight-based cooldown ---
-        # Decay all cooldowns by 1 now that one more song is transitioning.
-        for vid in list(state.autoplay_weights.keys()):
-            state.autoplay_weights[vid] -= 1
-            if state.autoplay_weights[vid] <= 0:
-                del state.autoplay_weights[vid]
-
-        # Cooldown for the chosen track scales with pool size so small pools
-        # (e.g. artist with only 4 search results) don't block every song for too long.
-        pool_size = len(candidates)
-        cooldown = min(AUTOPLAY_MAX_COOLDOWN, max(1, pool_size - 1))
-
-        # Popularity factor: prefer tracks with more views.
-        view_counts = [e.get("view_count") or 0 for e in candidates]
-        if any(v > 0 for v in view_counts):
-            max_vc = max(view_counts) or 1
-            # Normalise to [0.1, 1.0] so even the least-viewed song still has some chance.
-            pop_factor = [0.1 + 0.9 * (v / max_vc) for v in view_counts]
-        else:
-            # Search order is relevance-ranked; gently prefer earlier positions [1.0 → 0.6].
-            n = len(candidates)
-            pop_factor = [1.0 - 0.4 * (i / max(n - 1, 1)) for i in range(n)]
-
-        # Combined weight: cooldown penalty × popularity boost × version penalty.
-        # Fresh tracks (cooldown 0): full weight. Recently played: weight approaches 0.
-        # Alternate versions (acoustic, piano, slowed, etc.): weight × 0.1.
-        ver_factor = [
-            0.1 if _AUTOPLAY_DEPRIORITIZE_RE.search(e.get("title", "")) else 1.0
-            for e in candidates
-        ]
-        sel_weights = [
-            (1.0 / (1 + state.autoplay_weights.get(e["id"], 0))) * pf * vf
-            for e, pf, vf in zip(candidates, pop_factor, ver_factor)
-        ]
-
-        # Try candidates in weighted-random order until one fetches successfully.
-        remaining = list(zip(candidates, sel_weights))
-        while remaining:
-            entries_r, weights_r = zip(*remaining)
-            chosen = random.choices(entries_r, weights=weights_r, k=1)[0]
-            remaining = [(e, w) for e, w in remaining if e["id"] != chosen["id"]]
-            try:
-                info = await self._fetch_info(f"https://music.youtube.com/watch?v={chosen['id']}")
-                if "entries" in info:
-                    info = info["entries"][0]
-                # Post-fetch checks: title (full version may reveal "live" etc.) and artist match
-                if not _autoplay_title_ok(info.get("title", "")):
-                    continue
-                if not _autoplay_artist_ok(artist, _extract_artist(info)):
-                    continue
-                state.autoplay_weights[chosen["id"]] = cooldown
-                state.queue.append(Track(info, "Autoplay 🎲"))
-                state.last_artist = artist
-                return True
-            except Exception:
-                pass
-
-        return False
+            return None
+        entries = list(results.get("entries") or [])
+        self._ytm_cache.pop(key, None)
+        self._ytm_cache[key] = (time.time(), entries)
+        if len(self._ytm_cache) > 200:
+            self._ytm_cache.pop(next(iter(self._ytm_cache)))
+        return entries
 
     # --- Background tasks ---
 
@@ -969,6 +995,7 @@ class MusicCog(commands.Cog):
         items = list(state.queue)
         removed = items.pop(position - 1)
         state.queue = deque(items)
+        self._start_prefetch(interaction.guild_id, state)
         await interaction.response.send_message(f"🗑️ Removed **{removed.title}**.")
 
     @app_commands.command(name="clear", description="Clear the queue")
@@ -976,7 +1003,9 @@ class MusicCog(commands.Cog):
     async def clear(self, interaction: discord.Interaction):
         if await self._deny_non_dj(interaction):
             return
-        self.get_state(interaction.guild_id).queue.clear()
+        state = self.get_state(interaction.guild_id)
+        state.queue.clear()
+        self._start_prefetch(interaction.guild_id, state)
         await interaction.response.send_message("🗑️ Queue cleared.")
 
     @app_commands.command(name="shuffle", description="Shuffle the queue")
@@ -1433,7 +1462,7 @@ class MusicCog(commands.Cog):
         if await self._deny_non_dj(interaction):
             return
         state = self.get_state(interaction.guild_id)
-        state.autoplay = not state.autoplay
+        self._set_autoplay(interaction.guild_id, state, not state.autoplay)
         if state.autoplay:
             await interaction.response.send_message(
                 "🎲 Autoplay **enabled** — a related track will queue when the list runs out.")

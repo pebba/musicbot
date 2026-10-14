@@ -5,6 +5,7 @@ from collections import deque
 
 import discord
 
+from .constants import AUTOPLAY_HISTORY
 from .utils import _extract_artist
 
 
@@ -78,7 +79,7 @@ class GuildState:
         self.np_view = None  # NowPlayingView | None
         self.radio_station: str | None = None
         self.autoplay: bool = False
-        self.autoplay_weights: dict[str, int] = {}  # video_id → cooldown songs remaining
+        self.recent_songs: deque[str] = deque(maxlen=AUTOPLAY_HISTORY)  # song_key() of played tracks
         self.last_artist: str | None = None
         self.ytm_only: bool = False
         self._prefetch_task: asyncio.Task | None = None

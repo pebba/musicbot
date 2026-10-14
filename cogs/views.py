@@ -179,7 +179,7 @@ class NowPlayingView(discord.ui.View):
     @discord.ui.button(emoji="🎲", style=discord.ButtonStyle.secondary)
     async def toggle_autoplay(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = self.cog.get_state(self.guild_id)
-        state.autoplay = not state.autoplay
+        self.cog._set_autoplay(self.guild_id, state, not state.autoplay)
         button.style = discord.ButtonStyle.success if state.autoplay else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
 

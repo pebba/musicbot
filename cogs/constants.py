@@ -12,9 +12,11 @@ YTDL_OPTIONS = {
 # YouTube Music search "Songs" tab filter — filters out videos, albums, artists, playlists
 YTM_SONGS_SP = "EgWKAQIIAWoKEAoQAxAEEAkQBQ%3D%3D"
 
-# Autoplay: max songs a track must "wait" before it's fully available again.
-# Scales down automatically for small artist pools (see _autoplay_next).
-AUTOPLAY_MAX_COOLDOWN = 10
+# Autoplay: how many recently played songs it will not pick again.
+AUTOPLAY_HISTORY = 30
+# Autoplay only picks from this many of the top-ranked search results for an
+# artist. Past that, the results turn into deep cuts nobody knows.
+AUTOPLAY_DEPTH = 15
 
 # Autoplay title pre-filter: skip live recordings, karaoke, covers, etc.
 _AUTOPLAY_SKIP_RE = re.compile(
