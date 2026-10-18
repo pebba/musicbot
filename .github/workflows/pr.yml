@@ -1,0 +1,13 @@
+name: pr
+# Conventional Commits PR title (drives the version bump) and no Claude attribution. The repo's own CI stays as is.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  conventions:
+    uses: pebba/claude-standards/.github/workflows/conventions.yml@main
