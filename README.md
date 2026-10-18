@@ -2,6 +2,8 @@
 
 A self-hosted Discord music bot with YouTube Music, Spotify, live radio, autoplay, lyrics, and playlist support.
 
+**[⬇ Latest release](https://github.com/pebba/musicbot/releases/latest)**: every merge to `main` is released and deployed automatically; see [CHANGELOG.md](CHANGELOG.md).
+
 ## Features
 
 - **YouTube & YouTube Music** — play songs, albums, and playlists by name or URL
