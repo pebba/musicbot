@@ -1,13 +1,16 @@
 name: pr
 # Conventional Commits PR title (drives the version bump) and no Claude attribution. The repo's own CI stays as is.
 
+# Not on a draft: `ready_for_review` runs it. Skipped on the caller, so a draft
+# never reports the inner check at all rather than reporting it as passed.
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 jobs:
   conventions:
+    if: ${{ !github.event.pull_request.draft }}
     uses: pebba/claude-standards/.github/workflows/conventions.yml@main
