@@ -245,6 +245,14 @@ class MusicCog(commands.Cog):
         if not vc:
             return
 
+        # YouTube now attaches a pre-roll ad to some streams and answers 403 until
+        # it would have run; yt-dlp reports when the stream opens (available_at).
+        wait = track.available_at - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+            if state.current is not track or vc.is_playing() or not vc.is_connected():
+                return  # stopped, skipped or disconnected while waiting
+
         source = discord.PCMVolumeTransformer(
             discord.FFmpegPCMAudio(track.stream_url, **self._build_ffmpeg_opts(seek=seek)),
             volume=state.volume,
