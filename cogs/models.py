@@ -12,13 +12,14 @@ from .utils import _extract_artist
 class Track:
     __slots__ = (
         "stream_url", "title", "artist", "duration",
-        "webpage_url", "thumbnail", "requester", "query",
+        "webpage_url", "thumbnail", "requester", "query", "available_at",
     )
 
     def __init__(self, info: dict, requester: str, query: str | None = None):
         self.requester = requester
         self.query = query
         self.stream_url = info["url"]
+        self.available_at = info.get("available_at") or 0
         self.title = info.get("title", query or "Unknown")
         self.artist = _extract_artist(info)
         self.duration = info.get("duration", 0)
@@ -32,6 +33,7 @@ class Track:
         t.requester = requester
         t.query = query
         t.stream_url = None
+        t.available_at = 0
         t.title = query
         t.artist = ""
         t.duration = 0
@@ -41,6 +43,7 @@ class Track:
 
     def resolve(self, info: dict):
         self.stream_url = info["url"]
+        self.available_at = info.get("available_at") or 0
         self.title = info.get("title", self.title)
         self.artist = _extract_artist(info)
         self.duration = info.get("duration", 0)
