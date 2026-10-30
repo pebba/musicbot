@@ -14,7 +14,7 @@ jobs:
     runs-on: self-hosted
     defaults:
       run:
-        working-directory: /home/serverboi/musicbot
+        working-directory: /home/musicbot/musicbot
     steps:
       - name: Pull and install
         id: pull
