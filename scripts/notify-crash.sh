@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-BOT_DIR=/home/serverboi/musicbot
+BOT_DIR=/home/musicbot/musicbot
 WEBHOOK_URL=$(cat "$BOT_DIR/.discord-webhook" 2>/dev/null)
 DM_USER_ID=$(cat "$BOT_DIR/.discord-dm-user" 2>/dev/null)
 BOT_TOKEN=$(grep -m1 '^DISCORD_TOKEN=' "$BOT_DIR/.env" 2>/dev/null | cut -d= -f2-)

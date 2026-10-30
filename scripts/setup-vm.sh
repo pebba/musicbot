@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
-# Run once on the VM as serverboi to set up playlist backups and crash alerting.
+# Run once on the VM as the admin user (needs sudo) to set up the musicbot user,
+# playlist backups and crash alerting. The bot and the GitHub runner run as
+# musicbot, which has no sudo except restarting the bot, so CI jobs never get root.
 # The deploy workflow handles .env and webhook config automatically after this.
 set -e
 
-MUSICBOT_DIR=/home/serverboi/musicbot
+MUSICBOT_USER=musicbot
+MUSICBOT_HOME=/home/$MUSICBOT_USER
+MUSICBOT_DIR=$MUSICBOT_HOME/musicbot
+
+# --- Bot user ---
+id "$MUSICBOT_USER" >/dev/null 2>&1 || sudo useradd --create-home --shell /bin/bash "$MUSICBOT_USER"
+sudo chmod 750 "$MUSICBOT_HOME"
+# journalctl in the deploy health check
+sudo usermod -aG systemd-journal "$MUSICBOT_USER"
+# The only root command CI may run.
+echo "$MUSICBOT_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart musicbot" > /tmp/sudoers-musicbot
+sudo visudo -cf /tmp/sudoers-musicbot && sudo install -m 0440 -o root -g root /tmp/sudoers-musicbot /etc/sudoers.d/musicbot
+rm -f /tmp/sudoers-musicbot
 
 # --- Playlist backup cron ---
-BACKUP_DIR=/home/serverboi/musicbot-backups
-mkdir -p "$BACKUP_DIR"
+BACKUP_DIR=$MUSICBOT_HOME/musicbot-backups
+sudo -u "$MUSICBOT_USER" mkdir -p "$BACKUP_DIR"
 CRON_LINE="0 2 * * * tar -czf $BACKUP_DIR/playlists-\$(date +\%Y\%m\%d).tar.gz -C $MUSICBOT_DIR playlists && find $BACKUP_DIR -name 'playlists-*.tar.gz' -mtime +30 -delete"
-if crontab -l 2>/dev/null | grep -qF "musicbot-backups"; then
+if sudo crontab -u "$MUSICBOT_USER" -l 2>/dev/null | grep -qF "musicbot-backups"; then
   echo "Backup cron already installed."
 else
-  (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
+  (sudo crontab -u "$MUSICBOT_USER" -l 2>/dev/null; echo "$CRON_LINE") | sudo crontab -u "$MUSICBOT_USER" -
   echo "Backup cron installed — runs daily at 02:00, keeps 30 days in $BACKUP_DIR"
 fi
 
@@ -22,13 +36,16 @@ fi
 sudo sed -i 's/^#\?SystemMaxUse=.*/SystemMaxUse=200M/' /etc/systemd/journald.conf
 sudo systemctl restart systemd-journald
 
-CLEAN_LINE="0 4 * * 0 find /home/serverboi/actions-runner/_diag -type f -mtime +7 -delete 2>/dev/null; find /home/serverboi/.vscode-server/cli/servers -maxdepth 1 -type d -atime +30 -exec rm -rf {} + 2>/dev/null; rm -rf /home/serverboi/.cache/yt-dlp"
-if crontab -l 2>/dev/null | grep -qF "actions-runner/_diag"; then
+CLEAN_LINE="0 4 * * 0 find $MUSICBOT_HOME/actions-runner/_diag -type f -mtime +7 -delete 2>/dev/null; rm -rf $MUSICBOT_HOME/.cache/yt-dlp"
+if sudo crontab -u "$MUSICBOT_USER" -l 2>/dev/null | grep -qF "actions-runner/_diag"; then
   echo "Cleanup cron already installed."
 else
-  (crontab -l 2>/dev/null; echo "$CLEAN_LINE") | crontab -
+  (sudo crontab -u "$MUSICBOT_USER" -l 2>/dev/null; echo "$CLEAN_LINE") | sudo crontab -u "$MUSICBOT_USER" -
   echo "Cleanup cron installed — runs Sundays at 04:00."
 fi
+# VS Code Remote belongs to the admin user, so it is pruned from the admin crontab.
+VSCODE_LINE="0 4 * * 0 find $HOME/.vscode-server/cli/servers -maxdepth 1 -type d -atime +30 -exec rm -rf {} + 2>/dev/null"
+crontab -l 2>/dev/null | grep -qF ".vscode-server" || (crontab -l 2>/dev/null; echo "$VSCODE_LINE") | crontab -
 
 # --- JS runtime for yt-dlp ---
 # yt-dlp needs one for YouTube, or formats go missing. Installed to

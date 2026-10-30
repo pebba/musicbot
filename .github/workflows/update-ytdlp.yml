@@ -11,7 +11,7 @@ jobs:
     steps:
       - name: Update yt-dlp
         run: |
-          cd /home/serverboi/musicbot
+          cd /home/musicbot/musicbot
           source venv/bin/activate
           old=$(pip show yt-dlp | grep Version)
           pip install -U "yt-dlp[default]" -q

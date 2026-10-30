@@ -3,4 +3,4 @@ Description=Notify Discord on musicbot crash
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash /home/serverboi/musicbot/scripts/notify-crash.sh
+ExecStart=/bin/bash /home/musicbot/musicbot/scripts/notify-crash.sh
