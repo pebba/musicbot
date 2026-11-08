@@ -53,7 +53,7 @@ _AUTOPLAY_DEPRIORITIZE_RE = re.compile(
     re.IGNORECASE
 )
 
-FFMPEG_RECONNECT = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+FFMPEG_RECONNECT = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_http_error 403"
 
 _STATIONS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "radio_stations.json")
 try:
