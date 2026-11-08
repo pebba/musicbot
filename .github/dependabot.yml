@@ -15,6 +15,11 @@ updates:
     ignore:
       - dependency-name: multidict
         update-types: ["version-update:semver-major"]
+      # davey 0.2 no longer switches the DAVE key on commit/welcome; discord.py
+      # 2.7.1 does not call the new transition API, so the bot plays silence.
+      # Drop this once discord.py supports davey 0.2.
+      - dependency-name: davey
+        versions: [">=0.2"]
 
   - package-ecosystem: github-actions
     directory: "/"
