@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Versions follow SemVer; entries are generated from squash-merged PR titles.
 
+## [1.0.5] - 2026-11-08
+
+### Fixed
+
+- pin davey to 0.1.7 until discord.py supports 0.2 ([#44](https://github.com/pebba/musicbot/pull/44))
+
 ## [1.0.4] - 2026-10-30
 
 ### Fixed
